@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KRONOS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ── Hero ─────────────────────────────────────────────────── -->
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="brand">
+        <span class="brand-word">KRONOS</span>
+        <span class="brand-rule"></span>
+        <span class="brand-sub">Credit Portfolio Intelligence</span>
+      </div>
+      <span class="hero-badge">INTERNAL</span>
+    </div>
+  </header>
+
+  <!-- ── Main ──────────────────────────────────────────────────── -->
+  <main class="main" id="main">
+
+    <!-- ── Input Panel ──────────────────────────────────────────── -->
+    <div class="input-panel" id="inputPanel">
+      <div class="card unified-card">
+
+        <!-- Quick Analysis -->
+        <div class="prompt-section-label">Quick analysis</div>
+        <div class="canned-grid" id="cannedGrid">
+          <!-- populated dynamically from prompts.json -->
+        </div>
+
+        <!-- Chat Area -->
+        <div class="prompt-divider"><span>or write your own question</span></div>
+
+        <!-- Attached file strip (above textarea, hidden until file selected) -->
+        <div class="file-attachment" id="fileAttachment" hidden>
+          <div class="file-att-badge" id="filePillFormat"></div>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <span class="file-att-name mono" id="fileName"></span>
+          <span class="file-att-size" id="fileSize"></span>
+          <button class="file-att-remove" id="removeFile" aria-label="Remove file">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Chat input box (drag target) -->
+        <div class="chat-area" id="chatArea">
+          <div class="chat-drag-overlay">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            Drop to attach
+          </div>
+          <textarea
+            id="customPrompt"
+            class="prompt-textarea"
+            placeholder="Which vintages are underperforming and why? What's driving the uptick in 60+ day delinquencies?"
+            rows="4"
+          ></textarea>
+          <div class="chat-toolbar">
+            <button class="chat-paperclip" id="browseBtn" aria-label="Attach file" title="Attach file (.xlsx, .xls, .csv)">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 16.2a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <div class="chat-toolbar-right">
+              <span class="prompt-hint" id="promptHint"></span>
+              <button class="btn btn-primary btn-sm" id="runBtn" disabled>
+                Run Analysis
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/>
+                  <polyline points="12 5 19 12 12 19"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden />
+        </div>
+
+        <!-- Error strip -->
+        <div class="upload-error" id="uploadError" hidden>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span id="uploadErrorText"></span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ── Loading ───────────────────────────────────────────────── -->
+    <div class="loading-panel" id="loadingPanel" hidden>
+      <div class="pipeline">
+        <div class="pipeline-step" id="step-0">
+          <div class="step-dot"></div>
+          <div class="step-body">
+            <span class="step-name">Parsing file</span>
+            <span class="step-time mono" id="time-0"></span>
+          </div>
+        </div>
+        <div class="pipeline-step" id="step-1">
+          <div class="step-dot"></div>
+          <div class="step-body">
+            <span class="step-name">Running analysis pipeline</span>
+            <span class="step-time mono" id="time-1"></span>
+          </div>
+        </div>
+        <div class="pipeline-step" id="step-2">
+          <div class="step-dot"></div>
+          <div class="step-body">
+            <span class="step-name">Building prompt context</span>
+            <span class="step-time mono" id="time-2"></span>
+          </div>
+        </div>
+        <div class="pipeline-step" id="step-3">
+          <div class="step-dot"></div>
+          <div class="step-body">
+            <span class="step-name">Generating narrative</span>
+            <span class="step-time mono" id="time-3"></span>
+          </div>
+        </div>
+        <div class="pipeline-step" id="step-4">
+          <div class="step-dot"></div>
+          <div class="step-body">
+            <span class="step-name">Finalizing output</span>
+            <span class="step-time mono" id="time-4"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Results ───────────────────────────────────────────────── -->
+    <div class="results-panel" id="resultsPanel" hidden>
+      <div class="results-header">
+        <div class="results-meta">
+          <span class="results-label">Analysis Complete</span>
+          <span class="results-timestamp mono" id="resultsTimestamp"></span>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="newAnalysisBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-3.3"/>
+          </svg>
+          New Analysis
+        </button>
+      </div>
+
+      <div class="results-body">
+
+        <!-- Narrative -->
+        <div class="results-col results-narrative">
+          <div class="col-header">
+            <span class="col-title">Narrative</span>
+            <span class="col-badge mono">claude</span>
+          </div>
+          <div class="message-thread" id="messageThread">
+            <div class="message-block" id="firstMessage">
+              <div class="narrative-text" id="narrativeText"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Data -->
+        <div class="results-col results-data">
+          <div class="col-header">
+            <span class="col-title">Data Snapshot</span>
+            <span class="metrics-update-time mono" id="metricsUpdateTime" hidden></span>
+          </div>
+          <div class="metric-grid" id="metricGrid"></div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Follow-up FAB ─────────────────────────────────────────── -->
+  <button class="fab" id="followupFab" hidden aria-label="Ask a follow-up question">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"/>
+      <line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  </button>
+
+  <script src="main.js"></script>
+</body>
+</html>
