@@ -1,120 +1,164 @@
 # ── KRONOS · server.py ────────────────────────────────────────
 # Flask application entry point. Replaces Streamlit's main.py.
-# Serves the static frontend and hosts the /upload API route.
 #
-# ── HOW THIS MAPS TO YOUR EXISTING CODEBASE ──────────────────
-# In your existing app, main.py:
-#   - Receives the file upload and user instructions via Streamlit UI
-#   - Calls ask_workbook_agent() from agent_client.py
-#   - Stores the response in Streamlit session state
-#   - Renders the UI
+# This file does three things:
+#   1. Serves the static frontend files (index.html, styles.css,
+#      main.js, prompts.json) from the /static directory
+#   2. Hosts the POST /upload API route — the only endpoint the
+#      frontend calls
+#   3. Orchestrates the pipeline: file → analyze() → ask_agent()
+#      → JSON response back to the browser
 #
-# In KRONOS, server.py takes over that orchestration role:
-#   - Receives the file + prompt + mode via POST /upload (not Streamlit)
-#   - Calls analyze(file, mode)     ← processor.py (your deterministic layer)
-#   - Calls ask_workbook_agent()    ← agent_client.py (your LLM layer)
-#   - Returns JSON to the frontend  ← replaces Streamlit session state + UI render
+# ── How to run ────────────────────────────────────────────────
+# Locally:       python server.py        (runs on port 8888)
+# On Domino:     app.sh calls this file automatically
 #
-# The frontend (main.js) handles all UI rendering from the JSON response.
-# No session state needed — the browser holds state between turns.
+# ── Environment variables needed ──────────────────────────────
+# Set these before running (locally in your shell, or in Domino
+# project settings under "Environment Variables"):
+#
+#   AZURE_OPENAI_DEPLOYMENT  = gpt-4o          (or your deployment name)
+#   OPENAI_API_VERSION       = 2025-04-01-preview
+#   AZURE_OPENAI_ENDPOINT    = https://your-resource.openai.azure.com/
+#                              (optional on Domino — proxy handles it)
+#
+# Auth: no API key needed. Uses `az login` locally, managed identity
+# on Domino. See pipeline/llm.py for details.
 # ──────────────────────────────────────────────────────────────
+
+import traceback
 
 from flask import Flask, send_from_directory, request, jsonify
 
-# ── TODO (merge): Add these imports when wiring the pipeline ──
+# ── Pipeline imports ──────────────────────────────────────────
+# analyze()   — reads the uploaded file, runs deterministic analysis,
+#               returns { context: str, metrics: dict }
+#               Lives in pipeline/analyze.py
 #
-# from pipeline.analyze import analyze
-#   └─ analyze.py is the dispatcher. Rename to processor.py or point
-#      directly at your existing processor, then update this import.
-#
-# from your_path.agent_client import ask_workbook_agent
-#   └─ ask_workbook_agent() is the function in agent_client.py that:
-#        - turns analysis_result into prompt payloads (via prompts.py)
-#        - builds custom_inputs and the final payload
-#        - calls workbook_agent.py which calls Azure OpenAI via AzureChatOpenAI
-#        - normalizes the response and returns a structured result
-#      Update the import path to match where agent_client.py lives
-#      in your merged codebase.
-#
-# import os  ← needed for Azure env vars if not already handled in agent_client.py
+# ask_agent() — takes the context string + user question + mode,
+#               builds a LangChain chain, calls Azure OpenAI,
+#               returns { narrative: str }
+#               Lives in pipeline/agent.py
+from pipeline.analyze import analyze
+from pipeline.agent import ask_agent
 
+
+# ── Flask app ─────────────────────────────────────────────────
+# static_folder='static' tells Flask where to find index.html,
+# styles.css, main.js, and prompts.json.
 app = Flask(__name__, static_folder='static')
 
 
-# ── Static file serving ───────────────────────────────────────
-# Serves index.html, styles.css, main.js, prompts.json.
-# No changes needed here after merge.
+# ══════════════════════════════════════════════════════════════
+# ── STATIC FILE ROUTES ────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# These serve the frontend. No changes needed here.
 
 @app.route('/')
 def index():
+    """Serves the main UI (index.html)."""
     return send_from_directory('static', 'index.html')
+
 
 @app.route('/<path:path>')
 def static_files(path):
+    """
+    Serves any other static file by path.
+    Handles: styles.css, main.js, prompts.json, and any other
+    asset the browser requests from the frontend.
+    """
     return send_from_directory('static', path)
 
 
-# ── TODO (merge): Implement /upload ───────────────────────────
-# Uncomment and fill in once processor.py and agent_client.py are imported.
-#
-# What comes in from the frontend (multipart/form-data):
-#   file   → the uploaded .xlsx / .xls / .csv (replaces Streamlit file uploader)
-#   prompt → the user's question string       (replaces Streamlit instruction input)
-#   mode   → slug identifying which processor script to run
-#             e.g. "lending-risk", "traded-products", "portfolio-sampling"
-#             Empty string if user typed a custom question with no button selected.
-#
-# What must go back to the frontend (JSON):
-#   {
-#     "narrative": "string",    ← normalized response text from ask_workbook_agent()
-#     "metrics":   { ... }      ← structured part of analysis_result, formatted as
-#                                  tile schema (see pipeline/analyze.py for shape)
-#                                  Optional — omit key if not available for this mode.
-#   }
-#
-# Wiring steps:
-#   1. file   = request.files['file']
-#   2. prompt = request.form.get('prompt', '')
-#   3. mode   = request.form.get('mode', '')
-#
-#   4. result = analyze(file, mode)
-#      └─ processor.py runs deterministic analysis
-#         builds deterministic_narrative_payload  ← NEW primary LLM payload
-#           scoped to user ask, smaller than raw_results,
-#           richer and more faithful than commentary_facts
-#         keeps commentary_facts for backward compat (no longer primary)
-#         returns { context: deterministic_narrative_payload, metrics: ... }
-#
-#   5. agent_response = ask_workbook_agent(result['context'], prompt)
-#      └─ agent_client.py builds prompt payloads (via prompts.py)
-#         builds custom_inputs and final payload
-#         workbook_agent.py prepends system prompt, calls Azure OpenAI
-#         agent_client.py normalizes response and returns structured result
-#
-#   6. return jsonify({
-#          "narrative": agent_response['narrative'],  ← or however your agent returns text
-#          "metrics":   result['metrics']
-#      })
-#
-# NOTE on follow-up turns:
-#   The frontend sends the same file again on every follow-up question.
-#   mode will be empty on follow-ups (no canned button is active).
-#   You may want to skip the deterministic analysis step and call
-#   ask_workbook_agent directly with the prior context + new question,
-#   depending on how your agent handles conversation history.
-#
-# @app.route('/upload', methods=['POST'])
-# def upload():
-#     file   = request.files['file']
-#     prompt = request.form.get('prompt', '')
-#     mode   = request.form.get('mode', '')
-#     result         = analyze(file, mode)
-#     agent_response = ask_workbook_agent(result['context'], prompt)
-#     return jsonify({
-#         "narrative": agent_response['narrative'],
-#         "metrics":   result['metrics']
-#     })
+# ══════════════════════════════════════════════════════════════
+# ── API ROUTE: /upload ────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 
+@app.route('/upload', methods=['POST'])
+def upload():
+    """
+    The single API endpoint the frontend calls.
+
+    What comes in (multipart/form-data):
+        file   — the uploaded .xlsx, .xls, or .csv file
+        prompt — the user's question (from textarea or canned button)
+        mode   — the analysis mode slug (e.g. "portfolio-summary")
+                 Empty string "" if no canned button is selected
+
+    What goes back (JSON):
+        {
+            "narrative": "LLM-generated analysis text",
+            "metrics":   { "Section": [{ label, value, sentiment }] }
+        }
+
+    On error, returns:
+        { "error": "description" }  with HTTP 400 or 500
+    """
+
+    # ── Step 1: Extract inputs from the request ────────────────
+    file   = request.files.get('file')
+    prompt = request.form.get('prompt', '').strip()
+    mode   = request.form.get('mode', '').strip()
+
+    # ── Step 2: Validate inputs ────────────────────────────────
+    if not file:
+        return jsonify({"error": "No file uploaded. Please attach an Excel or CSV file."}), 400
+    if not prompt:
+        return jsonify({"error": "No prompt provided. Please enter a question or select an analysis type."}), 400
+
+    # ── Step 3: Run deterministic analysis ────────────────────
+    # analyze() reads the file, runs the processor script for this
+    # mode (or the placeholder if the mode isn't registered yet),
+    # and returns a structured payload.
+    #
+    # result["context"]  → the data string the LLM will analyze
+    # result["metrics"]  → the tile data for the Data Snapshot panel
+    #
+    # When your real processor scripts are wired in (pipeline/analyze.py
+    # SCRIPT_MAP), this call will run your deterministic_narrative_payload
+    # construction instead of the pandas placeholder.
+    try:
+        result = analyze(file, mode)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
+
+    # ── Step 4: Call the LLM agent ────────────────────────────
+    # ask_agent() builds a LangChain chain with the system prompt
+    # for this mode, injects the context and user question, calls
+    # Azure OpenAI, and returns { "narrative": "..." }.
+    #
+    # See pipeline/agent.py for chain details.
+    # See pipeline/prompts.py to customize the system/wrapper prompts.
+    try:
+        agent_response = ask_agent(
+            context=result["context"],
+            user_prompt=prompt,
+            mode=mode,
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"LLM call failed: {str(e)}"}), 500
+
+    # ── Step 5: Return the response ───────────────────────────
+    # The frontend (main.js) reads:
+    #   response.narrative → renders in the left column
+    #   response.metrics   → renders as tiles in the Data Snapshot panel
+    #
+    # metrics is optional — if analyze() returns no metrics or an
+    # empty dict, the Data Snapshot panel stays as-is (won't crash).
+    return jsonify({
+        "narrative": agent_response["narrative"],
+        "metrics":   result.get("metrics", {}),
+    })
+
+
+# ══════════════════════════════════════════════════════════════
+# ── ENTRY POINT ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
+    # debug=True enables auto-reload on file changes during local dev.
+    # On Domino, app.sh calls `python server.py` directly and Domino
+    # manages the process — debug mode is fine to leave on.
     app.run(port=8888, debug=True)

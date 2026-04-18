@@ -1,4 +1,24 @@
+# ── KRONOS · requirements.txt ─────────────────────────────────
+# Install with: pip install -r requirements.txt
+#
+# On Domino: declare these in the project environment config.
+# Match versions exactly to avoid compatibility issues.
+# ──────────────────────────────────────────────────────────────
+
+# ── Web framework ─────────────────────────────────────────────
 flask
+
+# ── Excel / CSV parsing ───────────────────────────────────────
 pandas
-openpyxl
-openai
+openpyxl          # required by pandas to read .xlsx files
+
+# ── LangChain + Azure OpenAI ──────────────────────────────────
+# Pinned versions — these three must stay in sync.
+# Do not upgrade langchain-openai without checking langchain compat.
+langchain==0.3.27
+langchain-openai==0.3.33
+
+# ── Azure authentication ──────────────────────────────────────
+# DefaultAzureCredential: uses `az login` locally, managed identity on Domino.
+# No API key needed — auth is handled via Azure AD bearer token.
+azure-identity==1.25.0
