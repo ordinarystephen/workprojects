@@ -1320,3 +1320,208 @@ code, .mono { font-family: var(--font-mono); }
 
   .metric-card { background: var(--surface-hover); }
 }
+
+
+/* ── Narrative Tabs ─────────────────────────────────────────── */
+/* "Analysis | Claims (N)" tab bar above the narrative text.     */
+
+.narrative-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+
+.narrative-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;       /* sits on top of the border-bottom */
+  padding: 6px 12px;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.narrative-tab:hover { color: var(--text); }
+
+.narrative-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.narrative-tab.tab-disabled {
+  color: var(--text-tertiary);
+  cursor: default;
+  opacity: 0.6;
+}
+
+
+/* ── Claims Panel ───────────────────────────────────────────── */
+/* Shown when user clicks the "Claims" tab.                      */
+
+.claims-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+.claim-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  animation: fadeSlideIn 0.25s ease both;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.claim-sentence {
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.5;
+  margin-bottom: 8px;
+  font-style: italic;
+}
+
+.claim-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.claim-source-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.claim-source {
+  font-size: 0.75rem;
+  color: var(--accent);
+  background: var(--accent-light);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.claim-divider {
+  color: var(--border-strong);
+  font-size: 0.75rem;
+}
+
+.claim-value {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.claims-empty {
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+  padding: 16px 0;
+  font-style: italic;
+}
+
+
+/* ── Verification Badge ─────────────────────────────────────── */
+/* Inline badge in the message-meta line.                        */
+
+.verification-badge {
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 20px;
+  margin-left: auto;        /* pushes to the right edge of message-meta */
+  white-space: nowrap;
+  cursor: default;
+}
+
+.verification-badge.verified {
+  color: var(--success);
+  background: var(--success-light);
+}
+
+.verification-badge.unverified {
+  color: var(--warning);
+  background: var(--warning-light);
+}
+
+
+/* ── Data Used Panel ────────────────────────────────────────── */
+/* Expandable "View source data sent to AI" section.            */
+
+.data-used-panel {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.data-used-toggle {
+  background: none;
+  border: none;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s;
+}
+
+.data-used-toggle:hover,
+.data-used-toggle.open {
+  color: var(--text-secondary);
+}
+
+.data-used-arrow {
+  font-size: 0.65rem;
+  transition: transform 0.15s;
+}
+
+.data-used-content {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+
+/* ── Dark mode additions ─────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  .claim-card { background: var(--surface-hover); }
+
+  .claim-source {
+    background: rgba(79, 122, 232, 0.15);
+    color: #7FA7F5;
+  }
+
+  .data-used-content {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.08);
+  }
+}
+}

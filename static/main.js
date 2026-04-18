@@ -394,10 +394,197 @@ function showResults(result, elapsed) {
   renderMetrics(result.metrics || {});
 
   // Dump narrative text and attach copy button
-  const narrative = result.narrative || '(No narrative returned)';
+  const narrative    = result.narrative    || '(No narrative returned)';
+  const claims       = result.claims       || [];
+  const contextSent  = result.context_sent || null;
+  const verification = result.verification || null;
+
+  // Inject tab bar above the narrative (Analysis | Claims).
+  // Only shows the Claims tab if the LLM returned structured claims.
+  buildNarrativeTabs(firstBlock, claims.length > 0);
+
   narrativeText.textContent = narrative;
+
+  // Render the Claims panel (hidden behind the tab — toggle via tab bar).
+  // Empty if structured output fell back to plain text.
+  renderClaimsPanel(firstBlock, claims);
+
+  // Add verification badge to the message-meta line already in the DOM.
+  if (verification && verification.total > 0) {
+    renderVerificationBadge(firstBlock, verification);
+  }
+
+  // Add "View source data" expandable below narrative + claims.
+  if (contextSent) renderDataUsedPanel(firstBlock, contextSent);
+
   addCopyButton(firstBlock, narrative);
   followupFab.hidden = false; // show the follow-up FAB
+}
+
+
+// ── Narrative Tabs ────────────────────────────────────────────
+// Builds "Analysis | Claims (N)" tab bar and inserts it before
+// #narrativeText inside the firstMessage block.
+// Tab clicks toggle between narrativeText and .claims-panel.
+
+function buildNarrativeTabs(block, hasClaims) {
+  // Remove any existing tabs from a previous run
+  block.querySelector('.narrative-tabs')?.remove();
+
+  const tabs = document.createElement('div');
+  tabs.className = 'narrative-tabs';
+
+  // Tab 1 — Analysis (always shown, active by default)
+  const analysisTab = document.createElement('button');
+  analysisTab.className = 'narrative-tab active';
+  analysisTab.textContent = 'Analysis';
+  analysisTab.dataset.panel = 'narrative';
+
+  // Tab 2 — Claims (only shown when structured output succeeded)
+  const claimsTab = document.createElement('button');
+  claimsTab.className = 'narrative-tab' + (hasClaims ? '' : ' tab-disabled');
+  claimsTab.dataset.panel = 'claims';
+  // Label is set in renderClaimsPanel once we know the count
+
+  tabs.appendChild(analysisTab);
+  tabs.appendChild(claimsTab);
+
+  // Insert tab bar immediately before #narrativeText
+  block.insertBefore(tabs, narrativeText);
+
+  // Tab click handler — toggles between the two panels
+  tabs.addEventListener('click', (e) => {
+    const btn = e.target.closest('.narrative-tab');
+    if (!btn || btn.classList.contains('tab-disabled')) return;
+
+    tabs.querySelectorAll('.narrative-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+
+    const showClaims = btn.dataset.panel === 'claims';
+    narrativeText.hidden   = showClaims;
+    const claimsPanel = block.querySelector('.claims-panel');
+    if (claimsPanel) claimsPanel.hidden = !showClaims;
+  });
+}
+
+
+// ── Claims Panel ──────────────────────────────────────────────
+// Renders a card for each structured claim returned by the LLM.
+// Inserted after #narrativeText, hidden by default (shown via tab click).
+// Each card shows: the cited sentence, source field, and cited value.
+
+function renderClaimsPanel(block, claims) {
+  // Remove any existing claims panel
+  block.querySelector('.claims-panel')?.remove();
+
+  const panel = document.createElement('div');
+  panel.className = 'claims-panel';
+  panel.hidden = true; // hidden until "Claims" tab is clicked
+
+  // Update the Claims tab label with the count now that we have it
+  const claimsTab = block.querySelector('.narrative-tab[data-panel="claims"]');
+  if (claimsTab) {
+    if (claims.length > 0) {
+      claimsTab.textContent = `Claims (${claims.length})`;
+    } else {
+      claimsTab.textContent = 'Claims';
+      claimsTab.title = 'Structured claims not available — LLM used plain text mode';
+    }
+  }
+
+  if (claims.length === 0) {
+    // Structured output fell back — show a helpful note
+    const empty = document.createElement('div');
+    empty.className = 'claims-empty';
+    empty.textContent = 'Structured claims are not available for this response. The LLM returned plain text output.';
+    panel.appendChild(empty);
+  } else {
+    claims.forEach((claim, i) => {
+      const card = document.createElement('div');
+      card.className = 'claim-card';
+      card.style.animationDelay = `${i * 40}ms`;
+      card.innerHTML = `
+        <div class="claim-sentence">"${escapeHtml(claim.sentence)}"</div>
+        <div class="claim-meta">
+          <span class="claim-source-label">Source</span>
+          <span class="claim-source">${escapeHtml(claim.source_field || '—')}</span>
+          <span class="claim-divider">·</span>
+          <span class="claim-value mono">${escapeHtml(claim.cited_value || '—')}</span>
+        </div>`;
+      panel.appendChild(card);
+    });
+  }
+
+  // Insert immediately after #narrativeText
+  narrativeText.insertAdjacentElement('afterend', panel);
+}
+
+
+// ── Verification Badge ────────────────────────────────────────
+// Adds a small badge to the .message-meta line showing how many
+// numbers in the narrative were found in the source data.
+// Green = all verified. Amber = some unverified (calculated/inferred).
+
+function renderVerificationBadge(block, verification) {
+  // Remove any existing badge
+  block.querySelector('.verification-badge')?.remove();
+
+  const meta = block.querySelector('.message-meta');
+  if (!meta) return;
+
+  const badge = document.createElement('span');
+  badge.className = 'verification-badge ' + (verification.all_clear ? 'verified' : 'unverified');
+
+  if (verification.all_clear) {
+    badge.textContent = `${verification.total} figures · all in source data`;
+    badge.title = 'Every number in the narrative was found in the data sent to the AI.';
+  } else {
+    badge.textContent = `${verification.unverified_count} of ${verification.total} figures not in source data`;
+    badge.title =
+      'These figures may be calculated (e.g. weighted averages) or inferred.\n' +
+      'Unverified: ' + verification.unverified.join(', ');
+  }
+
+  meta.appendChild(badge);
+}
+
+
+// ── Data Used Panel ───────────────────────────────────────────
+// Collapsible section below the narrative showing the exact context
+// string that was sent to the LLM. Allows the user to see exactly
+// what data the AI had access to when generating the narrative.
+
+function renderDataUsedPanel(block, contextSent) {
+  // Remove any existing panel
+  block.querySelector('.data-used-panel')?.remove();
+
+  const panel = document.createElement('div');
+  panel.className = 'data-used-panel';
+
+  const toggle = document.createElement('button');
+  toggle.className = 'data-used-toggle';
+  toggle.innerHTML = 'View source data sent to AI <span class="data-used-arrow">↓</span>';
+
+  const content = document.createElement('pre');
+  content.className = 'data-used-content';
+  content.textContent = contextSent;
+  content.hidden = true;
+
+  toggle.addEventListener('click', () => {
+    const isOpen = !content.hidden;
+    content.hidden = isOpen;
+    toggle.querySelector('.data-used-arrow').textContent = isOpen ? '↓' : '↑';
+    toggle.classList.toggle('open', !isOpen);
+  });
+
+  panel.appendChild(toggle);
+  panel.appendChild(content);
+
+  // Insert the panel after the claims panel (or after narrativeText
+  // if no claims panel exists), before the copy button which is added last
+  const claimsPanel = block.querySelector('.claims-panel');
+  const insertAfter  = claimsPanel || narrativeText;
+  insertAfter.insertAdjacentElement('afterend', panel);
 }
 
 
