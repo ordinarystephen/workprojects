@@ -21,6 +21,8 @@
 #   MLFLOW_EXPERIMENT_NAME   = kronos-dev      # or kronos-prod
 # ──────────────────────────────────────────────────────────────
 
+import base64
+import io
 import time
 import traceback
 
@@ -30,6 +32,21 @@ from pipeline.analyze   import analyze
 from pipeline.agent     import ask_agent
 from pipeline.validate  import cross_check_numbers
 from pipeline.tracking  import activate_mlflow, mlflow_run
+
+
+# ── JSON-upload adapter ───────────────────────────────────────
+# The Domino workspace proxy drops multipart/form-data POSTs, so the
+# frontend sends the file inside a JSON body as base64. This tiny
+# adapter exposes the same interface our processors expect from a
+# Flask file object: .read(), .filename, .content_length.
+class _Base64File:
+    def __init__(self, data: bytes, name: str = ""):
+        self._io = io.BytesIO(data)
+        self.filename = name
+        self.content_length = len(data)
+
+    def read(self, *args, **kwargs):
+        return self._io.read(*args, **kwargs)
 
 
 app = Flask(__name__, static_folder='static')
@@ -82,27 +99,46 @@ def static_files(path):
 def upload():
 
     # ── Step 1: Extract inputs ─────────────────────────────────
-    file   = request.files.get('file')
-    prompt = request.form.get('prompt', '').strip()
-    mode   = request.form.get('mode', '').strip()
+    # Two transports supported:
+    #   • application/json  — { file_name, file_b64, prompt, mode }
+    #                         (Domino workspace proxy drops multipart,
+    #                          so this is the default path from the UI)
+    #   • multipart/form-data — file + prompt + mode as form fields
+    #                         (kept for curl / local dev / future App deploys)
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        file_b64_str = payload.get('file_b64') or ''
+        prompt    = (payload.get('prompt') or '').strip()
+        mode      = (payload.get('mode') or '').strip()
+        file_name = (payload.get('file_name') or '').strip()
 
-    # ── Step 2: Validate inputs ────────────────────────────────
-    if not file:
-        return jsonify({"error": "No file uploaded."}), 400
+        if not file_b64_str:
+            return jsonify({"error": "No file uploaded."}), 400
+        try:
+            file_bytes = base64.b64decode(file_b64_str)
+        except Exception:
+            return jsonify({"error": "File payload is not valid base64."}), 400
+        file = _Base64File(file_bytes, file_name)
+        file_size = len(file_bytes)
+    else:
+        file   = request.files.get('file')
+        prompt = request.form.get('prompt', '').strip()
+        mode   = request.form.get('mode', '').strip()
+
+        if not file:
+            return jsonify({"error": "No file uploaded."}), 400
+        file_name = file.filename or ""
+        try:
+            file_size = (
+                file.content_length
+                or (request.content_length or 0)
+            )
+        except Exception:
+            file_size = 0
+
+    # ── Step 2: Validate prompt ────────────────────────────────
     if not prompt:
         return jsonify({"error": "No prompt provided."}), 400
-
-    # File metadata for MLflow tagging. content_length may be None
-    # when the stream has been consumed — we read it here before
-    # analyze() consumes the stream.
-    file_name = file.filename or ""
-    try:
-        file_size = (
-            file.content_length
-            or (request.content_length or 0)
-        )
-    except Exception:
-        file_size = 0
 
     # ── MLflow run wrapper ─────────────────────────────────────
     # When enabled: starts an MLflow run for this request, logs

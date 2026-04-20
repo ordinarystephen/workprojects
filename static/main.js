@@ -320,11 +320,10 @@ async function runAnalysis() {
   //
   // In demo mode we skip the network entirely so the animation can run
   // against the hard-coded mock without touching Flask.
-  const formData = new FormData();
-  formData.append('file', selectedFile);
-  formData.append('prompt', prompt);
-  formData.append('mode', activeMode || ''); // routes server to correct pipeline script; empty for custom questions
-
+  //
+  // Transport: JSON body with base64-encoded file. We previously sent
+  // multipart/form-data, but the Domino workspace proxy silently drops
+  // multipart POSTs. Plain application/json passes through.
   const uploadUrl = new URL('upload', document.baseURI).href;
   console.log('[KRONOS] Submitting upload', {
     resolvedUrl: uploadUrl,
@@ -337,7 +336,17 @@ async function runAnalysis() {
 
   const apiCall = USE_MOCK_RESULTS
     ? Promise.resolve(null)
-    : fetch(uploadUrl, { method: 'POST', body: formData })
+    : fileToBase64(selectedFile)
+        .then(file_b64 => fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_name: selectedFile.name,
+            file_b64,
+            prompt,
+            mode: activeMode || '',
+          }),
+        }))
         .then(async r => {
           console.log('[KRONOS] /upload response received', {
             status: r.status,
@@ -428,6 +437,22 @@ async function runAnalysis() {
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Reads a File as a base64 string (no data: URL prefix).
+// Used to ship the upload inside a JSON body since the Domino
+// workspace proxy drops multipart/form-data requests.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => {
+      const s = reader.result || '';
+      const i = s.indexOf(',');
+      resolve(i >= 0 ? s.slice(i + 1) : s);
+    };
+    reader.onerror = () => reject(reader.error || new Error('file read error'));
+    reader.readAsDataURL(file);
+  });
+}
 
 
 // ── Results ───────────────────────────────────────────────────
@@ -944,13 +969,13 @@ async function submitFollowup(question, inputEl) {
   messageThread.appendChild(dots);
   dots.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  // Reuse the same file — no re-upload needed
+  // Reuse the same file — still re-uploaded on each follow-up since the
+  // server is stateless. If proxy payload size ever becomes a concern, we
+  // can add a session-cache on the server and send just a file id.
+  //
   // Note: mode is not sent on follow-ups. The server may need to handle this
   // differently depending on whether follow-ups should re-run the pipeline
   // or only call the LLM with the existing context.
-  const formData = new FormData();
-  formData.append('file', selectedFile);
-  formData.append('prompt', question);
 
   // Fetch with typed outcome. In demo mode we skip the network and
   // reuse the mock narrative after a short fake think.
@@ -966,10 +991,20 @@ async function submitFollowup(question, inputEl) {
       pageBaseURI: document.baseURI,
       mode: activeMode || '(none)',
       fileName: selectedFile?.name,
-      promptLength: userMessage.length,
+      promptLength: question.length,
     });
     try {
-      const res = await fetch(uploadUrl, { method: 'POST', body: formData });
+      const file_b64 = await fileToBase64(selectedFile);
+      const res = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_name: selectedFile.name,
+          file_b64,
+          prompt: question,
+          mode: '',
+        }),
+      });
       console.log('[KRONOS] follow-up /upload response received', {
         status: res.status,
         ok: res.ok,

@@ -86,3 +86,24 @@ around the `/upload` fetch so the next failure is easier to diagnose.
 **Behavior change:** none for the happy path. On any failure, DevTools Console now shows what the browser actually attempted and how it failed — needed because Domino's workspace proxy can drop the POST silently before it reaches Flask.
 
 **Investigating an upload failure on Domino workspace:** open DevTools → Console, trigger the upload, and read the `[KRONOS]` lines. If the `/upload fetch failed` line shows `TypeError: Failed to fetch` with no response, the workspace proxy is blocking the POST — the fix is to publish the app via the Domino App tab (uses a different proxy that handles POST + multipart) and revert the port to 8888.
+
+---
+
+## Round 5 — JSON-encoded upload to dodge workspace-proxy multipart block
+
+Commit: _see `git log` on branch `kronos`_
+
+Confirmed via DevTools that the Domino workspace proxy at
+`/workspace/<id>/proxy/5000/` was silently dropping `multipart/form-data`
+POSTs (`net::ERR_FAILED` before the request hit Flask). Rather than publish
+as a Domino App, the frontend now ships the file inside a JSON body as
+base64, which the workspace proxy passes through cleanly.
+
+- [ ] `static/main.js` — `runAnalysis()` and `submitFollowup()` no longer build a `FormData`. Both read the file via a new `fileToBase64()` helper and POST `application/json` with `{ file_name, file_b64, prompt, mode }`. Also fixed a latent bug in the follow-up log that referenced an undefined `userMessage.length` (now `question.length`).
+- [ ] `server.py` — `/upload` now branches on `Content-Type`. JSON path decodes `file_b64`, wraps the bytes in a new `_Base64File` shim (exposes `.read()`, `.filename`, `.content_length`), and feeds it into the existing `analyze()` → `firm_level.run()` chain with zero changes downstream. Multipart path is preserved for `curl`, local dev, and any future Domino App deploy — that path still works as before.
+
+**Behavior change:** uploads from the KRONOS UI now succeed through the Domino workspace proxy. 437KB test workbook → ~583KB base64 JSON body, comfortably under typical proxy limits.
+
+**Compatibility:** the multipart fallback means a `curl -F file=@...` against `/upload` still works, so shell/CI probes are unaffected.
+
+**If payload size ever becomes an issue:** base64 inflates by ~33%. If users start hitting 413 or proxy limits, next step is to land files in a dataset dir on the Domino container and switch the UI to a file-picker + `GET /files` + small JSON `POST /analyze` with just the filename. Code-wise that's a ~30 min change.
