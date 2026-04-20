@@ -325,17 +325,19 @@ async function runAnalysis() {
   formData.append('prompt', prompt);
   formData.append('mode', activeMode || ''); // routes server to correct pipeline script; empty for custom questions
 
+  const uploadUrl = new URL('upload', document.baseURI).href;
   console.log('[KRONOS] Submitting upload', {
-    url: '/upload',
+    resolvedUrl: uploadUrl,
+    pageBaseURI: document.baseURI,
     mode: activeMode || '(none)',
-    fileName: attachedFile?.name,
-    fileSize: attachedFile?.size,
+    fileName: selectedFile?.name,
+    fileSize: selectedFile?.size,
     promptLength: prompt.length,
   });
 
   const apiCall = USE_MOCK_RESULTS
     ? Promise.resolve(null)
-    : fetch('/upload', { method: 'POST', body: formData })
+    : fetch(uploadUrl, { method: 'POST', body: formData })
         .then(async r => {
           console.log('[KRONOS] /upload response received', {
             status: r.status,
@@ -958,14 +960,16 @@ async function submitFollowup(question, inputEl) {
     await delay(1200);
     result = getMockResult();
   } else {
+    const uploadUrl = new URL('upload', document.baseURI).href;
     console.log('[KRONOS] Submitting follow-up', {
-      url: '/upload',
+      resolvedUrl: uploadUrl,
+      pageBaseURI: document.baseURI,
       mode: activeMode || '(none)',
-      fileName: attachedFile?.name,
+      fileName: selectedFile?.name,
       promptLength: userMessage.length,
     });
     try {
-      const res = await fetch('/upload', { method: 'POST', body: formData });
+      const res = await fetch(uploadUrl, { method: 'POST', body: formData });
       console.log('[KRONOS] follow-up /upload response received', {
         status: res.status,
         ok: res.ok,
