@@ -789,15 +789,22 @@ function renderMetrics(metrics) {
     return;
   }
 
-  // Detect whether metrics uses grouped sections (nested objects) or flat key-value pairs.
-  // Both formats are supported — the backend can return either.
-  const entries  = Object.entries(metrics);
-  const isGrouped = entries.some(([, v]) => typeof v === 'object' && v !== null && !Array.isArray(v));
+  // Three accepted shapes from the backend:
+  //   1) Section → array of tile objects: { "Section": [{ label, value, sentiment, delta }, ...] }
+  //      This is the documented response shape (see CLAUDE.md) and what firm_level.py returns.
+  //   2) Section → nested k/v object:     { "Section": { "Key": "Value", ... } }
+  //   3) Flat key/value pairs:            { "Key": "Value", ... }
+  const entries    = Object.entries(metrics);
+  const isSectioned = entries.some(
+    ([, v]) => Array.isArray(v) || (typeof v === 'object' && v !== null)
+  );
 
-  if (isGrouped) {
-    // Grouped: each top-level key is a section header, value is an array of metric objects
+  if (isSectioned) {
     entries.forEach(([groupKey, groupVal]) => {
-      if (typeof groupVal === 'object' && !Array.isArray(groupVal)) {
+      if (Array.isArray(groupVal)) {
+        addSectionHeader(groupKey);
+        groupVal.forEach(tile => addMetricCard(tile.label, tile.value, tile));
+      } else if (groupVal && typeof groupVal === 'object') {
         addSectionHeader(groupKey);
         Object.entries(groupVal).forEach(([k, v]) => addMetricCard(k, v));
       } else {
@@ -805,7 +812,6 @@ function renderMetrics(metrics) {
       }
     });
   } else {
-    // Flat: each entry is a label → value pair, rendered without section headers
     entries.forEach(([k, v]) => addMetricCard(k, v));
   }
 }
@@ -819,7 +825,7 @@ function addSectionHeader(label) {
 
 let metricCardIndex = 0; // used to stagger tile animation delays
 
-function addMetricCard(key, value) {
+function addMetricCard(key, value, tile = null) {
   const card = document.createElement('div');
   card.className = 'metric-card';
   card.style.animationDelay = `${metricCardIndex * 60}ms`; // stagger in
@@ -832,18 +838,35 @@ function addMetricCard(key, value) {
   const valEl = document.createElement('div');
   valEl.className = 'metric-value';
 
-  const raw = String(value);
+  const raw = value == null ? '' : String(value);
   valEl.textContent = raw;
 
-  // Color positive/negative values based on sign or percent direction
-  if (raw.startsWith('+') || (raw.includes('%') && parseFloat(raw) > 0 && !raw.startsWith('-'))) {
-    valEl.classList.add('positive'); // green
-  } else if (raw.startsWith('-') || (raw.includes('%') && parseFloat(raw) < 0)) {
-    valEl.classList.add('negative'); // red
+  // Sentiment from the tile object wins over heuristic sign/percent detection.
+  const sentiment = tile && tile.sentiment;
+  if (sentiment === 'positive') {
+    valEl.classList.add('positive');
+  } else if (sentiment === 'negative') {
+    valEl.classList.add('negative');
+  } else if (sentiment === 'warning') {
+    valEl.classList.add('warning');
+  } else if (!sentiment) {
+    if (raw.startsWith('+') || (raw.includes('%') && parseFloat(raw) > 0 && !raw.startsWith('-'))) {
+      valEl.classList.add('positive');
+    } else if (raw.startsWith('-') || (raw.includes('%') && parseFloat(raw) < 0)) {
+      valEl.classList.add('negative');
+    }
   }
 
   card.appendChild(keyEl);
   card.appendChild(valEl);
+
+  if (tile && tile.delta) {
+    const deltaEl = document.createElement('div');
+    deltaEl.className = 'metric-delta';
+    deltaEl.textContent = tile.delta;
+    card.appendChild(deltaEl);
+  }
+
   metricGrid.appendChild(card);
 }
 
