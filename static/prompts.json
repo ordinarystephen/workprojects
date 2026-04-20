@@ -1,5 +1,11 @@
 [
   {
+    "title": "Firm-Level View",
+    "desc": "Commitment, outstanding & C&C exposure",
+    "mode": "firm-level",
+    "prompt": "Provide a firm-level portfolio snapshot. Cover total committed and outstanding exposure, the breadth of parents and industries, and the criticized & classified exposure both in dollars and as a percentage of commitment."
+  },
+  {
     "title": "Portfolio Summary",
     "desc": "Health overview & key indicators",
     "mode": "portfolio-summary",

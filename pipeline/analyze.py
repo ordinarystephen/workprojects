@@ -30,6 +30,8 @@ import io
 import json
 import pandas as pd
 
+from pipeline import firm_level
+
 
 # ══════════════════════════════════════════════════════════════
 # ── SCRIPT MAP ────────────────────────────────────────────────
@@ -61,6 +63,7 @@ import pandas as pd
 # └─────────────────────────────────────────────────────────────┘
 #
 SCRIPT_MAP: dict = {
+    "firm-level":          firm_level.run,
     # "portfolio-summary":   portfolio_summary.run,   # TODO
     # "concentration-risk":  concentration_risk.run,  # TODO
     # "delinquency-trends":  delinquency_trends.run,  # TODO
