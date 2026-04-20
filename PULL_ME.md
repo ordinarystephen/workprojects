@@ -133,3 +133,26 @@ Replaced the monolithic `pipeline/firm_level.py` with a **template + classifier 
 **Compatibility:** the dispatcher still returns `{ context, metrics }` — no frontend or server changes needed. Custom-prompt path still uses `placeholder_processor()` unchanged.
 
 **To test on Domino:** upload your existing firm-level workbook (single or multi-period) and click *Firm-Level View*. Verify (a) tiles render correctly, (b) IG/NIG + horizontal sections appear when those columns are populated, (c) the validation note appears in the narrative if `Pass+SM+SS+Dbt+L+NoReg ≠ Committed` within $2 tolerance.
+
+---
+
+## Round 7 — FAB + follow-up flow: state-machine hardening
+
+Commit: _see `git log` on branch `kronos`_
+
+State-machine audit of the existing FAB + follow-up flow turned up four bugs (P0/P1/P2). All fixed in this round. No new states or visuals — purely closing leaks and adding feedback.
+
+- [ ] `static/main.js` — added module-level `followupController` (AbortController) + `followupInFlight` guard + `FOLLOWUP_TIMEOUT_MS = 60_000`. New `abortFollowup()` helper called from `runAnalysis()` and the New Analysis button so a parent reset cancels the in-flight fetch. `submitFollowup()` early-returns on `followupInFlight`, arms the AbortController, attaches `signal` to the fetch, runs a 60s timeout, distinguishes timeout (user-facing message) vs parent abort (silent return) in the catch, and re-checks `signal.aborted` after `fileToBase64` to cover the pre-fetch race. FAB-close path now confirms before discarding a typed draft. Send + Cmd/Ctrl+Enter call new `flashEmpty(ta)` (shake + brief tint) instead of silent no-op when textarea is empty. `showFollowupError()` now scrolls the error into view.
+- [ ] `static/styles.css` — added `.followup-textarea.shake` rule (reuses existing `shake` keyframe + adds a brief CTA-tinted background) for empty-submit feedback.
+
+**Bugs fixed:**
+- **P0** — Cmd/Ctrl+Enter during in-flight submit no longer issues a parallel fetch (was producing two response blocks per question).
+- **P0** — Mid-submit "New Analysis" no longer leaks state (was appending a stray FAB and message-block to the now-hidden thread).
+- **P1** — 60s fetch timeout so a hung Domino proxy can't pin the UI in submitting state forever.
+- **P1** — Closing the FAB with a typed draft now confirms before discarding.
+- **P2** — Empty-submit (Send or Cmd/Enter) now shakes + tints the textarea instead of silent no-op.
+- **P2** — Error row scrolls into view so the user can't miss it after a failed submit.
+
+**Behavior change:** none on the happy path. Failure paths are now visible and recoverable; double-submits are impossible; mid-submit cancels are clean.
+
+**Compatibility:** purely additive. No new DOM, no new IDs, no API changes.

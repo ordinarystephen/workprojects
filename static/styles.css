@@ -1302,6 +1302,12 @@ code, .mono { font-family: var(--font-mono); }
   animation: shake 0.35s ease;
 }
 
+/* Empty-submit feedback for the follow-up textarea */
+.followup-textarea.shake {
+  animation: shake 0.35s ease;
+  background: color-mix(in srgb, var(--cta) 6%, var(--surface));
+}
+
 /* Metric card stagger */
 @keyframes metricIn {
   from { opacity: 0; transform: translateY(5px); }

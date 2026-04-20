@@ -72,6 +72,13 @@ let activeMode      = null;  // Mode slug from prompts.json (e.g. "lending-risk"
                              // Sent to server as formData 'mode' to route the correct
                              // pipeline script. Null when user types a custom question.
 
+// Follow-up request lifecycle. Module-level so unrelated handlers
+// ("New Analysis", runAnalysis reset) can abort an in-flight request
+// instead of letting it resolve into a hidden DOM and leak state.
+let followupController = null;  // AbortController for the current /upload fetch
+let followupInFlight   = false; // true between submit start and resolve/error
+const FOLLOWUP_TIMEOUT_MS = 60_000;
+
 
 // ── Upload ────────────────────────────────────────────────────
 
@@ -309,6 +316,7 @@ async function runAnalysis() {
   });
 
   // Clear previous thread content: follow-ups, dividers, first message label
+  abortFollowup();
   narrativeText.textContent = '';
   document.getElementById('firstMessage').querySelector('.message-meta')?.remove();
   messageThread.querySelectorAll('.thread-divider, .thinking-dots, .message-block:not(#firstMessage), .followup-input').forEach(el => el.remove());
@@ -884,6 +892,7 @@ function formatKey(k) {
 // can immediately re-run against the same file with a new question.
 
 newAnalysisBtn.addEventListener('click', () => {
+  abortFollowup();
   resultsPanel.hidden = true;
   loadingPanel.hidden = true;
   followupFab.hidden  = true;
@@ -903,7 +912,11 @@ newAnalysisBtn.addEventListener('click', () => {
 followupFab.addEventListener('click', () => {
   const existing = document.getElementById('followupInput');
   if (existing) {
-    // Already open — close it
+    // Already open — close it. If the user has typed a draft, confirm
+    // before discarding (closing nukes the textarea contents along with
+    // the element).
+    const draft = existing.querySelector('.followup-textarea')?.value.trim();
+    if (draft && !window.confirm('Discard your follow-up draft?')) return;
     existing.remove();
     followupFab.classList.remove('open');
     return;
@@ -926,7 +939,7 @@ followupFab.addEventListener('click', () => {
 
   inputEl.querySelector('.followup-send').addEventListener('click', () => {
     const q = ta.value.trim();
-    if (!q) return;
+    if (!q) { flashEmpty(ta); return; }
     submitFollowup(q, inputEl);
   });
 
@@ -934,7 +947,8 @@ followupFab.addEventListener('click', () => {
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       const q = ta.value.trim();
-      if (q) submitFollowup(q, inputEl);
+      if (!q) { flashEmpty(ta); return; }
+      submitFollowup(q, inputEl);
     }
   });
 
@@ -961,12 +975,32 @@ function buildFollowupInput() {
   return wrap;
 }
 
+// Aborts any in-flight follow-up fetch and clears the lifecycle flags.
+// Safe to call when nothing is in flight — does nothing.
+// Called by: runAnalysis() (new run), newAnalysisBtn (reset to input).
+function abortFollowup() {
+  if (followupController) {
+    followupController.abort();
+    followupController = null;
+  }
+  followupInFlight = false;
+}
+
 // Submits a follow-up question.
-// Interaction states: idle → submitting → (rendering | error).
-//   submitting: input disabled, FAB hidden, dots visible
+// Interaction states: idle → submitting → (rendering | error | aborted).
+//   submitting: input disabled, FAB hidden, dots visible, AbortController armed
 //   rendering:  input removed, response block appended
 //   error:      input restored, inline error row with Retry
+//   aborted:    parent reset (New Analysis / runAnalysis) — bail silently
+//
+// Reentrancy: a followupInFlight guard prevents double-submits (e.g. a
+// second Cmd/Enter while readonly, since keydown still fires on readonly
+// textareas). A 60s timeout aborts the fetch so a hung proxy can't pin
+// the UI in the submitting state forever.
 async function submitFollowup(question, inputEl) {
+  if (followupInFlight) return;            // ignore double-submits
+  followupInFlight = true;
+
   const textarea   = inputEl.querySelector('.followup-textarea');
   const sendBtn    = inputEl.querySelector('.followup-send');
   const oldError   = inputEl.querySelector('.followup-error');
@@ -1004,6 +1038,7 @@ async function submitFollowup(question, inputEl) {
   // reuse the mock narrative after a short fake think.
   let result   = null;
   let errorMsg = null;
+  let aborted  = false;
   if (USE_MOCK_RESULTS) {
     await delay(1200);
     result = getMockResult();
@@ -1016,8 +1051,18 @@ async function submitFollowup(question, inputEl) {
       fileName: selectedFile?.name,
       promptLength: question.length,
     });
+    followupController = new AbortController();
+    const signal = followupController.signal;
+    const timeoutId = setTimeout(() => {
+      // Distinguish a user/parent abort (no controller anymore) from a
+      // timeout abort, so the catch block can show a useful message.
+      if (followupController) followupController.abort('timeout');
+    }, FOLLOWUP_TIMEOUT_MS);
     try {
       const file_b64 = await fileToBase64(selectedFile);
+      // fileToBase64 doesn't honor signal — re-check before the fetch
+      // so a parent-reset during base64 encoding still bails cleanly.
+      if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
       const res = await fetch(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1027,6 +1072,7 @@ async function submitFollowup(question, inputEl) {
           prompt: question,
           mode: '',
         }),
+        signal: followupController.signal,
       });
       console.log('[KRONOS] follow-up /upload response received', {
         status: res.status,
@@ -1043,10 +1089,31 @@ async function submitFollowup(question, inputEl) {
         errorMsg = result?.error || `Server error (${res.status})`;
       }
     } catch (err) {
-      console.error('[KRONOS] follow-up /upload fetch failed (network/CORS/proxy)', err);
-      errorMsg = `Network error — could not reach the server. (${err?.message || err})`;
+      if (err?.name === 'AbortError') {
+        // Timeout fires the abort with reason='timeout'. A parent reset
+        // (New Analysis / runAnalysis) calls abortFollowup() with no
+        // reason — in that case the DOM is already gone, so bail silent.
+        if (followupController?.signal?.reason === 'timeout') {
+          errorMsg = 'Request timed out after 60s. The server may be busy — try again.';
+        } else {
+          aborted = true;
+        }
+      } else {
+        console.error('[KRONOS] follow-up /upload fetch failed (network/CORS/proxy)', err);
+        errorMsg = `Network error — could not reach the server. (${err?.message || err})`;
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      followupController = null;
     }
   }
+
+  followupInFlight = false;
+
+  // ── aborted (parent reset) ──────────────────────────────────
+  // The thread DOM has already been wiped by runAnalysis() / newAnalysisBtn.
+  // Don't touch divider/dots/inputEl — they're detached. Just return.
+  if (aborted) return;
 
   // ── error state ─────────────────────────────────────────────
   if (errorMsg) {
@@ -1110,6 +1177,22 @@ function showFollowupError(inputEl, message) {
     submitFollowup(q, inputEl);
   });
   chatArea.parentNode.insertBefore(err, chatArea);
+  // Make sure the user actually sees the failure if they've scrolled
+  // away — without this the textarea stays in view and Send looks like
+  // it silently no-op'd.
+  err.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Brief shake + tint on the textarea to signal "this is required".
+// Used when the user hits Send / Cmd+Enter with empty content.
+function flashEmpty(ta) {
+  ta.classList.remove('shake');
+  // Force a reflow so re-adding the class restarts the animation
+  // (otherwise repeated empty-clicks would only animate the first time).
+  void ta.offsetWidth;
+  ta.classList.add('shake');
+  ta.focus();
+  setTimeout(() => ta.classList.remove('shake'), 400);
 }
 
 // Sanitise strings before inserting into innerHTML
