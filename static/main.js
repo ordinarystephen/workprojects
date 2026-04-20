@@ -845,19 +845,30 @@ function buildFollowupInput() {
 }
 
 // Submits a follow-up question.
-// Appends a thread divider, thinking dots, then the response block.
-// If the response includes metrics, updates the data snapshot panel.
+// Interaction states: idle → submitting → (rendering | error).
+//   submitting: input disabled, FAB hidden, dots visible
+//   rendering:  input removed, response block appended
+//   error:      input restored, inline error row with Retry
 async function submitFollowup(question, inputEl) {
-  inputEl.remove();
-  followupFab.classList.remove('open');
+  const textarea   = inputEl.querySelector('.followup-textarea');
+  const sendBtn    = inputEl.querySelector('.followup-send');
+  const oldError   = inputEl.querySelector('.followup-error');
+  if (oldError) oldError.remove();
 
-  // Thread divider
+  // ── submitting state ────────────────────────────────────────
+  textarea.readOnly   = true;
+  sendBtn.disabled    = true;
+  sendBtn.setAttribute('aria-busy', 'true');
+  const originalSend  = sendBtn.innerHTML;
+  sendBtn.innerHTML   = '<span class="followup-spinner" aria-hidden="true"></span>Sending…';
+  followupFab.hidden  = true; // prevent a second follow-up mid-request
+
+  // Thread divider + thinking dots
   const divider = document.createElement('div');
   divider.className = 'thread-divider';
   divider.textContent = 'Follow-up';
   messageThread.appendChild(divider);
 
-  // Thinking animation while API is in-flight
   const dots = document.createElement('div');
   dots.className = 'thinking-dots';
   dots.innerHTML = '<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>';
@@ -872,13 +883,38 @@ async function submitFollowup(question, inputEl) {
   formData.append('file', selectedFile);
   formData.append('prompt', question);
 
-  const result = await fetch('/upload', { method: 'POST', body: formData })
-    .then(r => r.json())
-    .catch(() => null); // null triggers getMockResult() fallback below — REMOVE ON MERGE
+  // Fetch with typed outcome. demoFallback=true means network failure
+  // should fall back to mock (removed on merge — see getMockResult TODOs).
+  let result     = null;
+  let errorMsg   = null;
+  let networkFail = false;
+  try {
+    const res = await fetch('/upload', { method: 'POST', body: formData });
+    result = await res.json().catch(() => null);
+    if (!res.ok) errorMsg = result?.error || `Server error (${res.status})`;
+  } catch {
+    networkFail = true; // REMOVE ON MERGE: set errorMsg instead once mock path is gone
+  }
 
+  // ── error state ─────────────────────────────────────────────
+  if (errorMsg) {
+    divider.remove();
+    dots.remove();
+    textarea.readOnly = false;
+    sendBtn.disabled  = false;
+    sendBtn.removeAttribute('aria-busy');
+    sendBtn.innerHTML = originalSend;
+    followupFab.hidden = false;
+    showFollowupError(inputEl, errorMsg);
+    textarea.focus();
+    return;
+  }
+
+  // ── rendering state ─────────────────────────────────────────
   dots.remove();
+  inputEl.remove();
+  followupFab.classList.remove('open');
 
-  // Render follow-up response block
   const block = document.createElement('div');
   block.className = 'message-block slide-down';
 
@@ -897,7 +933,7 @@ async function submitFollowup(question, inputEl) {
 
   // TODO (REMOVE ON MERGE): Delete getMockResult().narrative fallback once
   // the real /upload route returns live data.
-  const narrative = result?.narrative || getMockResult().narrative;
+  const narrative = result?.narrative || (networkFail ? getMockResult().narrative : '');
 
   // If the follow-up response includes updated metrics, re-render the data panel
   if (result?.metrics) updateMetrics(result.metrics, timeStr);
@@ -905,6 +941,25 @@ async function submitFollowup(question, inputEl) {
   block.querySelector('.narrative-text').textContent = narrative;
   addCopyButton(block, narrative);
   followupFab.hidden = false;
+}
+
+// Inline error row above the textarea. Retry resubmits the current
+// textarea value (so the user can edit before retrying).
+function showFollowupError(inputEl, message) {
+  const chatArea = inputEl.querySelector('.followup-chat-area');
+  const err = document.createElement('div');
+  err.className = 'followup-error';
+  err.setAttribute('role', 'alert');
+  err.innerHTML = `
+    <span class="followup-error-msg">${escapeHtml(message)}</span>
+    <button type="button" class="followup-retry">Retry</button>`;
+  err.querySelector('.followup-retry').addEventListener('click', () => {
+    const q = inputEl.querySelector('.followup-textarea').value.trim();
+    if (!q) return;
+    err.remove();
+    submitFollowup(q, inputEl);
+  });
+  chatArea.parentNode.insertBefore(err, chatArea);
 }
 
 // Sanitise strings before inserting into innerHTML
