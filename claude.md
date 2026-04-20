@@ -53,7 +53,13 @@
   /pipeline
     __init__.py           ← Package marker (empty)
     analyze.py            ← Dispatcher: maps mode slug → correct processor script
-                             Includes placeholder_processor() for dev/demo
+                             SCRIPT_MAP: { "firm-level": firm_level.run, ...future modes }
+                             Falls back to placeholder_processor() for unregistered modes
+    firm_level.py         ← First real processor. run(file_obj) → { context, metrics }
+                             Reads Excel, validates 8 required columns, computes:
+                               distinct parents, distinct industries,
+                               total commitment ($M), total outstanding ($M),
+                               criticized & classified ($M), C&C % of commitment
     agent.py              ← LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code)
                              • State, Context, MlflowConfigAgentContext (pydantic)
                              • create_llm() — AzureChatOpenAI with DefaultAzureCredential
@@ -90,6 +96,17 @@
 | `GET` | `/` | Serves `index.html` |
 | `POST` | `/upload` | Receives file + prompt + mode, runs pipeline, returns JSON |
 
+### POST /upload Transports
+
+The route accepts **two request shapes**; pick whichever works through the proxy in front of it.
+
+| `Content-Type` | Body | When to use |
+|---|---|---|
+| `application/json` | `{ file_name, file_b64, prompt, mode }` (file_b64 = base64 of the workbook bytes) | **UI default.** Required on Domino workspace URLs (`/workspace/<id>/proxy/<port>/`) — the workspace proxy silently drops multipart POSTs |
+| `multipart/form-data` | `file` + `prompt` + `mode` as form fields | curl, local dev, and Domino **published apps** (different proxy, handles multipart) |
+
+`server.py` branches on `request.is_json`. The JSON path decodes `file_b64` and wraps the bytes in a tiny `_Base64File` shim that exposes `.read()`, `.filename`, and `.content_length` — from `analyze()` / processors downstream, the upload looks identical whichever transport was used.
+
 ### POST /upload Response Shape
 
 ```json
@@ -112,7 +129,8 @@ All fields except `narrative` are optional — the frontend uses optional chaini
 ```
 User uploads file + selects mode + enters prompt
       ↓
-POST /upload  (multipart/form-data: file, prompt, mode)
+POST /upload  (application/json from UI: { file_name, file_b64, prompt, mode }
+               or multipart/form-data from curl/App: file, prompt, mode)
       ↓
 server.py
   └─ with mlflow_run(mode, file_name, file_size, user_prompt) as run:   ← pipeline/tracking.py
@@ -154,6 +172,14 @@ main.js renders:
 Every request carries a `mode` slug (e.g. `"portfolio-summary"`) sent from the frontend. `pipeline/analyze.py` maps this to the correct processor script via `SCRIPT_MAP`. Mode slugs must match the `"mode"` field in `static/prompts.json`.
 
 Custom questions (no canned button selected) send `mode = ''` — `analyze()` falls back to `placeholder_processor()`.
+
+**Currently wired modes:**
+| Slug | Processor | Status |
+|---|---|---|
+| `firm-level` | `pipeline/firm_level.py :: run()` | **Live** — first real processor |
+| `portfolio-summary` / `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | Placeholder fallback only |
+
+The `firm-level` workbook must contain these columns or `firm_level.run()` raises `ValueError` (surfaced as a 500 with the message): `Ultimate Parent Code`, `Risk Assessment Industry`, `Committed Exposure`, `Outstanding Exposure`, `Special Mention Rated Exposure`, `Substandard Rated Exposure`, `Doubtful Rated Exposure`, `Loss Rated Exposure`.
 
 ### Environment Variables
 
@@ -346,13 +372,16 @@ Also safe to delete: `typewrite()` function (unused).
 
 ## Domino-Specific Notes
 
-- App published via **`app.sh`** — starts Flask on port **8888**
-- Domino proxies the URL and handles auth — no login needed inside the app
-- All JS `fetch()` calls are **same-origin**
-- **Do not rely on ephemeral disk storage** — write to `/domino/datasets` for persistent files
-- Environment variables set in Domino project settings (no `.env` file committed)
-- Auth: managed identity on Domino (no `az login` needed there)
-- **MLflow from Domino:** requires Domino can reach Databricks. User confirmed Domino→Databricks networking is expected to work, but their AICE access wasn't set up yet as of 2026-04-20 — hence the kill switch on MLflow
+- **Two deploy modes:**
+  - **Published App** (via `app.sh`) — Flask on port **8888**, bound to `0.0.0.0`. Proxy handles multipart POSTs correctly. This is the eventual target.
+  - **Workspace (AICE Studio, current)** — Flask runs inside the interactive workspace on port **5000**, bound to `0.0.0.0`. Accessed via the workspace-forwarded URL (`/aice-studio/workspace/<id>/proxy/5000/`). 8888 is typically already in use inside the workspace container, hence 5000. When flipping between modes, update `app.run(...)` in `server.py` accordingly.
+- **Workspace proxy quirk:** the `/workspace/<id>/proxy/<port>/` route silently drops `multipart/form-data` POSTs (`net::ERR_FAILED` at the browser, request never reaches Flask). KRONOS sidesteps this by shipping uploads as `application/json` with a base64 file payload — see the "POST /upload Transports" table above. Multipart still works for published Apps and for `curl` against localhost.
+- **URL resolution in the browser:** the workspace URL has a path prefix. All `fetch()` calls in `main.js` compute `new URL('upload', document.baseURI).href` so the prefix is preserved. An absolute `/upload` would hit the domain root and fail.
+- Domino proxies the URL and handles auth — no login needed inside the app.
+- **Do not rely on ephemeral disk storage** — write to `/domino/datasets` for persistent files.
+- Environment variables set in Domino project settings (no `.env` file committed).
+- Auth: managed identity on Domino (no `az login` needed there).
+- **MLflow from Domino:** requires Domino can reach Databricks. User confirmed Domino→Databricks networking is expected to work, but their AICE access wasn't set up yet as of 2026-04-20 — hence the kill switch on MLflow.
 
 ---
 
@@ -404,14 +433,20 @@ When making a new change for the user, always:
 - [x] FAB follow-up: loading state on Send, inline error row with Retry, FAB hidden during in-flight request
 - [x] Real server-side stage timings returned in `/upload` response (`timings_ms`) and overwritten onto pipeline step labels; also logged to MLflow as `analyze_ms` / `llm_ms` / `verify_ms`
 - [x] `PULL_ME.md` sync-checklist workflow established for Domino pulls
+- [x] **`pipeline/firm_level.py` wired up as first real `SCRIPT_MAP` entry** — reads uploaded workbook, computes six firm-level figures, narrates via Azure OpenAI, renders tiles. "Firm-Level View" button added at position 1 of `prompts.json`
+- [x] `USE_MOCK_RESULTS` demo toggle in `main.js` — default `false` so real API errors are now visible. Flip to `true` to bypass Flask and render `getMockResult()` for presentations
+- [x] **JSON upload transport + workspace proxy workaround.** UI posts `application/json` with a base64 file payload so uploads survive the Domino workspace proxy (which drops multipart). `server.py` branches on `Content-Type` and wraps the decoded bytes in a `_Base64File` shim — processors downstream see no difference. Multipart path preserved for curl / published Apps.
+- [x] `main.js` resolves the fetch URL via `new URL('upload', document.baseURI).href` so the workspace URL prefix (`/aice-studio/workspace/<id>/proxy/5000/`) is preserved instead of being stripped by an absolute path.
+- [x] `[KRONOS]`-prefixed `console.log` / `console.error` instrumentation around both `/upload` fetch sites — request shape, response status, parse errors, non-OK bodies, and raw `err.message` on network/CORS failures. Makes proxy-level failures diagnosable from DevTools alone.
+- [x] **Verified end-to-end on Domino workspace (2026-04-20):** upload → firm-level processor → Azure OpenAI narration → tiles rendered successfully inside the AICE Studio workspace (port 5000, host `0.0.0.0`)
 
 ### Still To Do
 - [ ] Install `aice-mlflow-plugins==0.1.3` in the bank Python environment (internal package)
 - [ ] Confirm Domino can reach Databricks MLflow from the KRONOS compute environment
 - [ ] Flip `KRONOS_MLFLOW_ENABLED=true` when Databricks / AICE access is provisioned
 - [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace TODO placeholders)
-- [ ] Port `processor.py` into KRONOS — register modes in `SCRIPT_MAP`, ensure return shape matches `{ context, metrics }`
-- [ ] Build `deterministic_narrative_payload` in `processor.py` — mode-scoped, replaces `commentary_facts` as primary LLM input
+- [ ] Port remaining processors (`portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) and register in `SCRIPT_MAP` — `firm-level` is the working reference pattern
+- [ ] Build `deterministic_narrative_payload` in each processor — mode-scoped, replaces `commentary_facts` as primary LLM input
 - [ ] (optional) Delete the mock data path entirely once the Domino deploy is stable and demos no longer need a backend-less fallback
 - [ ] Update `prompts.json` with real mode slugs and prompt language for actual use cases
 - [ ] Test with real `.xlsx` files end-to-end

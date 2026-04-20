@@ -1,134 +1,121 @@
 # ── KRONOS · pipeline/analyze.py ──────────────────────────────
 # The analysis dispatcher. server.py calls analyze(file, mode) here.
 #
-# This file has two jobs:
-#   1. ROUTE — map the mode slug to the correct processor script
-#   2. PLACEHOLDER — provide a working default processor that reads
-#      any Excel/CSV and returns a pandas summary so the app runs
-#      end-to-end before your real deterministic scripts are wired in
+# Pipeline (per upload):
+#   1. classifier.classify(file) reads every sheet, matches each to
+#      a registered Template (Lending, etc.), validates, and returns
+#      typed DataFrames keyed by template name.
+#   2. For each matched template, we compute its cube once. Cubes
+#      are the deterministic JSON the slicers consume.
+#   3. The mode + the cubes drive routing to a slicer/processor
+#      that returns { context, metrics }.
 #
-# ── When you integrate your real processor scripts ────────────
-# Your existing processor.py is the real version of this file.
-# When you're ready to merge, you have two options:
-#
-#   Option A (recommended): Keep this file as the thin dispatcher.
-#   Add imports from your real scripts at the top of SCRIPT_MAP,
-#   and register each mode. The placeholder_processor() below can
-#   be removed once all modes are covered.
-#
-#   Option B: Replace this file entirely with your processor.py
-#   and update the import in server.py:
-#       from pipeline.analyze import analyze
-#
-# ── SCRIPT_MAP keys must match prompts.json "mode" slugs ──────
-# Current slugs: portfolio-summary, concentration-risk,
-#                delinquency-trends, risk-segments,
-#                exec-briefing, stress-outlook
+# Falls back to placeholder_processor() for:
+#   - mode == ""             (custom question, no canned button)
+#   - mode not in MODE_MAP   (button visible in UI but processor not wired yet)
 # ──────────────────────────────────────────────────────────────
 
+from __future__ import annotations
+
 import io
-import json
+
 import pandas as pd
 
-from pipeline import firm_level
+from pipeline.cube.lending import compute_lending_cube
+from pipeline.loaders.classifier import classify
+from pipeline.processors.lending import firm_level as lending_firm_level
 
 
 # ══════════════════════════════════════════════════════════════
-# ── SCRIPT MAP ────────────────────────────────────────────────
+# ── MODE MAP ──────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════
 #
-# Maps mode slugs → processor functions.
-# Each value must be a callable: fn(file_obj) -> dict
-# with return shape: { "context": str, "metrics": dict }
+# Each entry maps a frontend mode slug to:
+#   - "template": which template's cube the slicer needs.
+#   - "slicer":   callable(cube) -> { context, metrics }.
 #
-# ┌─────────────────────────────────────────────────────────────┐
-# │  TODO: Uncomment and fill in each entry as you port your    │
-# │  real processor scripts into this project.                  │
-# │                                                             │
-# │  Example once your scripts are in place:                    │
-# │    from pipeline.scripts import portfolio_summary           │
-# │    SCRIPT_MAP = {                                           │
-# │        "portfolio-summary": portfolio_summary.run,          │
-# │        ...                                                  │
-# │    }                                                        │
-# │                                                             │
-# │  Or if your processor.py handles all modes with internal    │
-# │  branching, import it once and map all slugs to it:         │
-# │    from pipeline import processor                           │
-# │    SCRIPT_MAP = {                                           │
-# │        "portfolio-summary": processor.run,                  │
-# │        "concentration-risk": processor.run,                 │
-# │        ...                                                  │
-# │    }                                                        │
-# └─────────────────────────────────────────────────────────────┘
+# Add new lending modes (concentration-risk, delinquency-trends, ...)
+# alongside firm-level. Add new templates by extending the classifier
+# registry in pipeline/loaders/classifier.py and adding a slicer here.
 #
-SCRIPT_MAP: dict = {
-    "firm-level":          firm_level.run,
-    # "portfolio-summary":   portfolio_summary.run,   # TODO
-    # "concentration-risk":  concentration_risk.run,  # TODO
-    # "delinquency-trends":  delinquency_trends.run,  # TODO
-    # "risk-segments":       risk_segments.run,        # TODO
-    # "exec-briefing":       exec_briefing.run,        # TODO
-    # "stress-outlook":      stress_outlook.run,       # TODO
+MODE_MAP: dict[str, dict] = {
+    "firm-level": {
+        "template": "lending",
+        "slicer":   lending_firm_level.slice_firm_level,
+    },
+    # "concentration-risk":  { "template": "lending", "slicer": ... },
+    # "delinquency-trends":  { "template": "lending", "slicer": ... },
+    # ...
 }
+
+
+# ══════════════════════════════════════════════════════════════
+# ── DISPATCHER ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
+def analyze(file_obj, mode: str) -> dict:
+    """
+    Routes the uploaded file through the appropriate pipeline.
+
+    Args:
+        file_obj : file-like object (Flask request.files['file'] or _Base64File)
+        mode     : slug string (e.g. "firm-level"). Empty string for custom prompts.
+
+    Returns:
+        dict with keys "context" (str) and "metrics" (dict).
+
+    Behavior:
+        - Mode in MODE_MAP: classify → compute cube → slice
+        - Mode not in MODE_MAP: fall back to placeholder_processor (reads the
+                                 raw file again and produces a basic summary).
+    """
+    spec = MODE_MAP.get(mode)
+
+    if not spec:
+        return placeholder_processor(file_obj)
+
+    # Classify the workbook. Raises ValueError on missing required columns
+    # or unrecognized sheets — server.py catches and surfaces as a 500.
+    classified = classify(file_obj)
+
+    template_name = spec["template"]
+    if template_name not in classified["classified"]:
+        seen = [s["name"] for s in classified["metadata"]["sheets_seen"]]
+        raise ValueError(
+            f"Mode '{mode}' requires a {template_name} sheet, but the workbook "
+            f"didn't include one. Sheets seen: {seen}."
+        )
+
+    df = classified["classified"][template_name]
+
+    if template_name == "lending":
+        cube = compute_lending_cube(df)
+        return spec["slicer"](cube)
+
+    # Future templates (traded_products, ...) get their compute path here.
+    raise ValueError(f"No cube computer registered for template '{template_name}'.")
 
 
 # ══════════════════════════════════════════════════════════════
 # ── PLACEHOLDER PROCESSOR ─────────────────────────────────────
 # ══════════════════════════════════════════════════════════════
 #
-# A working default that reads any Excel or CSV file and returns:
-#   - context:  a readable summary string for the LLM
-#   - metrics:  basic tile data (row count, columns, numeric stats)
-#
-# This runs when:
-#   a) The mode has no entry in SCRIPT_MAP (not yet wired), OR
-#   b) mode is "" (user typed a custom question, no button selected)
-#
-# ┌─────────────────────────────────────────────────────────────┐
-# │  TODO: Replace this function with your real processor       │
-# │  logic once you've ported processor.py. Until then, this    │
-# │  gives the LLM real data from the uploaded file to work     │
-# │  with — it just isn't the mode-specific reduction.          │
-# └─────────────────────────────────────────────────────────────┘
-#
+# Fallback that reads any Excel/CSV and returns a basic summary.
+# Used when the user asks a custom question (mode == "") or selects
+# a mode that hasn't been wired into MODE_MAP yet.
+
 def placeholder_processor(file_obj) -> dict:
-    """
-    Reads an Excel or CSV file and produces a basic analysis payload.
-    Used as a fallback until real processor scripts are registered.
-
-    Args:
-        file_obj: file-like object from Flask request.files['file']
-
-    Returns:
-        dict:
-            "context"  — formatted string summarizing the workbook data.
-                         This is passed to ask_agent() as the LLM's
-                         data input (the deterministic_narrative_payload slot).
-            "metrics"  — dict of tile data for the Data Snapshot panel.
-                         Shape: { "Section": [{ label, value, sentiment }] }
-    """
-
-    # ── Read the file bytes ────────────────────────────────────
-    # Flask file objects are file-like streams. We read all bytes
-    # so we can pass them to pandas via BytesIO (in-memory buffer).
     file_bytes = file_obj.read()
 
-    # ── Parse as Excel or CSV ─────────────────────────────────
-    # Try Excel first. If that fails (e.g. it's a CSV), fall back.
     try:
         df = pd.read_excel(io.BytesIO(file_bytes))
     except Exception:
         df = pd.read_csv(io.BytesIO(file_bytes))
 
-    # ── Basic shape info ──────────────────────────────────────
     row_count = len(df)
     col_count = len(df.columns)
     column_names = list(df.columns)
 
-    # ── Numeric column summaries ──────────────────────────────
-    # Select columns with numeric data types and compute basic stats.
-    # Capped at 15 columns to keep the context string manageable.
     numeric_cols = df.select_dtypes(include="number").columns.tolist()[:15]
     numeric_summaries = {}
     for col in numeric_cols:
@@ -144,9 +131,6 @@ def placeholder_processor(file_obj) -> dict:
             "nulls":  int(df[col].isna().sum()),
         }
 
-    # ── Non-numeric (categorical) column summaries ─────────────
-    # For text/category columns, show distinct value count and
-    # top 5 most common values. Capped at 10 columns.
     cat_cols = df.select_dtypes(exclude="number").columns.tolist()[:10]
     cat_summaries = {}
     for col in cat_cols:
@@ -156,14 +140,6 @@ def placeholder_processor(file_obj) -> dict:
             "top_5": {str(k): int(v) for k, v in top_vals.items()},
         }
 
-    # ── Build context string for the LLM ──────────────────────
-    # This is the "deterministic_narrative_payload" slot.
-    # It's a readable text summary — prose + key figures —
-    # rather than raw JSON (LLMs narrate better from text).
-    #
-    # TODO: When you port processor.py, replace this section with
-    # your actual deterministic_narrative_payload construction.
-    # The shape this returns (a string) stays the same.
     context_lines = [
         f"Portfolio workbook: {row_count:,} records across {col_count} columns.",
         f"Columns: {', '.join(column_names)}",
@@ -188,38 +164,18 @@ def placeholder_processor(file_obj) -> dict:
         for col, stats in cat_summaries.items():
             top = ", ".join(f"{k} ({v})" for k, v in stats["top_5"].items())
             context_lines.append(
-                f"  {col}: {stats['distinct_values']} distinct values. "
-                f"Top: {top}"
+                f"  {col}: {stats['distinct_values']} distinct values. Top: {top}"
             )
 
     context = "\n".join(context_lines)
 
-    # ── Build metrics for the Data Snapshot tiles ──────────────
-    # The frontend renders whatever shape you return here.
-    # Schema: { "Section Name": [{ label, value, sentiment, delta? }] }
-    # sentiment: "positive" | "negative" | "warning" | "neutral"
-    #
-    # TODO: Replace these placeholder tiles with your real metrics
-    # once your processor scripts are wired in. The tile names,
-    # values, and sentiments should come from your deterministic output.
     metrics: dict = {
         "Portfolio Overview": [
-            {
-                "label": "Total Records",
-                "value": f"{row_count:,}",
-                "sentiment": "neutral",
-            },
-            {
-                "label": "Data Columns",
-                "value": str(col_count),
-                "sentiment": "neutral",
-            },
+            {"label": "Total Records", "value": f"{row_count:,}", "sentiment": "neutral"},
+            {"label": "Data Columns",  "value": str(col_count),    "sentiment": "neutral"},
         ],
     }
 
-    # ── Add a tile per numeric column (first 4 only) ───────────
-    # This gives the tiles panel some real content in placeholder mode.
-    # Remove this block when your real metrics are wired.
     if numeric_summaries:
         numeric_tiles = []
         for col, stats in list(numeric_summaries.items())[:4]:
@@ -231,57 +187,4 @@ def placeholder_processor(file_obj) -> dict:
         if numeric_tiles:
             metrics["Field Averages (Placeholder)"] = numeric_tiles
 
-    return {
-        "context": context,
-        "metrics": metrics,
-    }
-
-
-# ══════════════════════════════════════════════════════════════
-# ── DISPATCHER ────────────────────────────════════════════════
-# ══════════════════════════════════════════════════════════════
-
-def analyze(file_obj, mode: str) -> dict:
-    """
-    Routes the uploaded file to the correct processor based on mode.
-
-    Called from server.py's /upload route with the uploaded file
-    and the mode slug from the frontend.
-
-    Args:
-        file_obj : file-like object from Flask request.files['file']
-        mode     : slug string (e.g. "portfolio-summary").
-                   Empty string "" if user typed a custom question
-                   without selecting a canned button.
-
-    Returns:
-        dict:
-            "context"  — string passed to ask_agent() as the data payload
-            "metrics"  — dict of tile data for the Data Snapshot panel
-
-    Behavior:
-        - If mode is in SCRIPT_MAP: routes to that processor's run() fn
-        - If mode is not in SCRIPT_MAP (including ""):
-          falls back to placeholder_processor()
-          (this covers both unregistered modes and custom questions)
-    """
-
-    runner = SCRIPT_MAP.get(mode)
-
-    if runner:
-        # ── Real processor found — run it ──────────────────────
-        # When your real scripts are registered, they take over here.
-        # Each must accept file_obj and return { context, metrics }.
-        return runner(file_obj)
-    else:
-        # ── Fallback: placeholder processor ────────────────────
-        # Runs when:
-        #   - mode is "" (custom question, no button selected)
-        #   - mode key exists in prompts.json but not yet in SCRIPT_MAP
-        #     (i.e. the button is visible but the processor isn't wired yet)
-        #
-        # TODO: Once all modes are registered in SCRIPT_MAP, you may
-        # want to raise an error for unknown modes instead of falling
-        # back silently. For now, the fallback lets the app run fully
-        # during development before all processors are ported.
-        return placeholder_processor(file_obj)
+    return {"context": context, "metrics": metrics}

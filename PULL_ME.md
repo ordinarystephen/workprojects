@@ -107,3 +107,29 @@ base64, which the workspace proxy passes through cleanly.
 **Compatibility:** the multipart fallback means a `curl -F file=@...` against `/upload` still works, so shell/CI probes are unaffected.
 
 **If payload size ever becomes an issue:** base64 inflates by ~33%. If users start hitting 413 or proxy limits, next step is to land files in a dataset dir on the Domino container and switch the UI to a file-picker + `GET /files` + small JSON `POST /analyze` with just the filename. Code-wise that's a ~30 min change.
+
+---
+
+## Round 6 — Lending pipeline rebuild (templates → classifier → cube → slicer)
+
+Commit: _see `git log` on branch `kronos`_
+
+Replaced the monolithic `pipeline/firm_level.py` with a **template + classifier + cube + slicer** architecture. The classifier now auto-detects which template a sheet matches by column signature, the cube computes every KRI once per upload, and per-mode slicers pick which slice to send to the LLM. This is the foundation for porting the remaining canned modes without re-reading the workbook each time.
+
+- [ ] `pipeline/templates/` — **NEW DIR.** `__init__.py` (empty), `base.py` (`Template` ABC + `FieldSpec` + `ValidationWarning` + `Role` literal), `lending.py` (`LendingTemplate` with all 37 columns tagged: hierarchy, period, ratings, categorical dims, horizontal flags, stock numerics, weighted-average numerators, watchlist passthrough).
+- [ ] `pipeline/scales/` — **NEW DIR.** `pd_scale.py` defines the C00…CDF rating scale (15 buckets, C00-C07 = Investment Grade), with `code_for_pd()`, `is_investment_grade()`, `direction()` (upgrade/downgrade/unchanged), and IG/NIG list helpers.
+- [ ] `pipeline/parsers/` — **NEW DIR.** `regulatory_rating.py` parses split regulatory ratings like `"SS - 18%, D - 42%, L - 40%"` into normalized `[(code, fraction), …]` lists. Includes `equals()` (order-insensitive, 0.5pp tolerance), `worst_code()`, `direction()`, `format_percent()`.
+- [ ] `pipeline/loaders/` — **NEW DIR.** `classifier.py` reads every sheet in the workbook, matches each against `Template.SIGNATURE`, validates matched sheets, and returns `{ classified: { template_name: df }, metadata: {…} }`. Raises ValueError on no matches, signature collisions, or duplicate template matches.
+- [ ] `pipeline/cube/` — **NEW DIR.** `models.py` defines pydantic schemas (`LendingCube`, `KriBlock`, `GroupingHistory`, `ContributorBlock`, `MomBlock`, etc., all `extra="forbid"`). `lending.py` is the cube computer: `compute_lending_cube(df) → LendingCube` produces firm-level KRIs, by-industry / by-segment / by-branch / by-horizontal / by-IG-status sub-cubes, watchlist firm-level aggregate, top contributors at parent level, and full month-over-month derivations (new originations, exits, PD + regulatory rating changes, exposure movers) when the file contains ≥ 2 periods.
+- [ ] `pipeline/processors/lending/` — **NEW DIR.** `firm_level.py` implements `slice_firm_level(cube) → { context, metrics }`. Builds prose context with all firm-level KRIs + IG/NIG split + horizontal portfolios + watchlist + period coverage + validation note. Returns metrics dict matching the existing tile-array contract (sections: Firm-Level Overview, Investment-Grade Split, Horizontal Portfolios, Watchlist).
+- [ ] `pipeline/analyze.py` — rewritten to use `MODE_MAP` instead of `SCRIPT_MAP`. Looks up `{ template, slicer }` per mode, calls `classify(file)`, computes the cube once, then calls the slicer. Falls back to the verbatim `placeholder_processor()` for custom prompts and unwired modes.
+- [ ] `pipeline/firm_level.py` — **DELETED.** Replaced by the template + cube + processor split above.
+- [ ] `claude.md` — minor doc updates left over from earlier rounds (transports table, currently-wired modes table, firm-level required columns).
+
+**Behavior change:** the `firm-level` mode now has a much richer narrative context (IG/NIG split, horizontal portfolios, watchlist aggregate, multi-period coverage, regulatory-vs-committed validation note). Tile output adds three new sections: Investment-Grade Split, Horizontal Portfolios, Watchlist. The existing Firm-Level Overview section is preserved.
+
+**Multi-period correctness:** previous monolithic processor double-counted when a workbook contained multiple `Month End` snapshots (e.g. Jan + Feb). The cube selects the latest period for stock metrics — this fixes that bug.
+
+**Compatibility:** the dispatcher still returns `{ context, metrics }` — no frontend or server changes needed. Custom-prompt path still uses `placeholder_processor()` unchanged.
+
+**To test on Domino:** upload your existing firm-level workbook (single or multi-period) and click *Firm-Level View*. Verify (a) tiles render correctly, (b) IG/NIG + horizontal sections appear when those columns are populated, (c) the validation note appears in the narrative if `Pass+SM+SS+Dbt+L+NoReg ≠ Committed` within $2 tolerance.
