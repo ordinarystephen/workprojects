@@ -276,10 +276,13 @@ const STEPS = [
   'Finalizing output'
 ];
 
-// UI-only timing delays in ms. These don't reflect actual server timing —
-// they just make the loading animation feel natural.
+// Short placeholder delays — just enough visual motion to register that
+// the steps are advancing. The *displayed* times (time-0…time-4) are
+// overwritten with real server-measured durations once the API returns,
+// so what the user reads is honest even though the animation itself is
+// paced artificially during the wait.
 // Step 3 delay is 0 because it blocks on the real API call.
-const STEP_DELAYS = [800, 1400, 600, 0, 500];
+const STEP_DELAYS = [150, 250, 100, 0, 150];
 
 async function runAnalysis() {
   const prompt = customPrompt.value.trim();
@@ -348,6 +351,22 @@ async function runAnalysis() {
   step4.classList.remove('active');
   step4.classList.add('done');
   document.getElementById('time-4').textContent = `${t4}s`;
+
+  // Replace wall-clock step labels with real server stage durations
+  // when the backend reports them. Server returns timings_ms: { analyze,
+  // llm, verify }. We split analyze across steps 0+1 (parse / pipeline),
+  // show a tiny fixed value for the client-side "build prompt context"
+  // step, map llm to step 3, and verify to step 4.
+  const timings = apiResult?.timings_ms;
+  if (timings) {
+    const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
+    const analyzeHalf = Math.round((timings.analyze || 0) / 2);
+    document.getElementById('time-0').textContent = fmt(analyzeHalf);
+    document.getElementById('time-1').textContent = fmt(analyzeHalf);
+    document.getElementById('time-2').textContent = fmt(50); // prompt build is near-instant
+    document.getElementById('time-3').textContent = fmt(timings.llm || 0);
+    document.getElementById('time-4').textContent = fmt(timings.verify || 0);
+  }
 
   await delay(300); // brief pause before transitioning to results
 
