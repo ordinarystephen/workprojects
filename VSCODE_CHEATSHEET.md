@@ -51,10 +51,13 @@ So `portfolio_summary.run` means: "the `run()` function inside `pipeline/scripts
 |---|---|---|
 | `from pipeline.analyze import analyze` | `pipeline/analyze.py` | the `analyze()` function |
 | `from pipeline.agent import ask_agent` | `pipeline/agent.py` | the `ask_agent()` function |
-| `from pipeline.llm import build_llm` | `pipeline/llm.py` | the `build_llm()` function |
+| `from pipeline.tracking import mlflow_run` | `pipeline/tracking.py` | the `mlflow_run()` context manager |
 | `from pipeline.prompts import get_system_prompt` | `pipeline/prompts.py` | the `get_system_prompt()` function |
 | `portfolio_summary.run` | `pipeline/scripts/portfolio_summary.py` | the `run()` function |
 | `concentration_risk.run` | `pipeline/scripts/concentration_risk.py` | the `run()` function |
+
+Note: `pipeline/llm.py` was removed during the bank-standard refactor — the
+Azure OpenAI client is now built inside `pipeline/agent.py` (in `create_llm()`).
 
 **The rule:** Replace `.` with `/` and add `.py` at the end to get the file path.
 `pipeline.scripts.portfolio_summary` → `pipeline/scripts/portfolio_summary.py`

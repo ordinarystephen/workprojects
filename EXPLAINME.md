@@ -23,23 +23,29 @@ User browser
   ↓
 POST /upload  (HTTP request to Flask)
   ↓
-server.py              ← orchestrator, calls the two pipeline steps
-  ├─ analyze(file, mode)         → pipeline/analyze.py
-  │    └─ reads Excel with pandas
-  │    └─ runs deterministic calculations
-  │    └─ returns:
-  │         context  = text summary of the data  (goes to the LLM)
-  │         metrics  = numbers for the tile panel (goes to the UI)
+server.py              ← orchestrator, wraps the request in an MLflow run
   │
-  └─ ask_agent(context, prompt, mode) → pipeline/agent.py
-       └─ gets the system prompt for this mode  → pipeline/prompts.py
-       └─ builds a LangChain chain
-       └─ calls Azure OpenAI via pipeline/llm.py
-       └─ returns: narrative = AI-written analysis text
+  └─ with mlflow_run(...) as run:               → pipeline/tracking.py
+       (no-op when KRONOS_MLFLOW_ENABLED is off — default)
+       │
+       ├─ analyze(file, mode)                   → pipeline/analyze.py
+       │    └─ reads Excel with pandas
+       │    └─ runs deterministic calculations
+       │    └─ returns:
+       │         context  = text summary of the data  (goes to the LLM)
+       │         metrics  = numbers for the tile panel (goes to the UI)
+       │
+       └─ ask_agent(context, prompt, mode)      → pipeline/agent.py
+            └─ invokes a compiled LangGraph
+            └─ the graph has one node: narrate
+                  └─ gets the system prompt for this mode → pipeline/prompts.py
+                  └─ builds the Azure OpenAI client (inline, no separate llm.py)
+                  └─ calls the LLM with structured output
+            └─ returns: { narrative, claims }
   ↓
-server.py returns JSON: { narrative, metrics }
+server.py returns JSON: { narrative, metrics, claims, context_sent, verification }
   ↓
-Browser renders narrative + tiles
+Browser renders narrative + claims tab + verification badge + tiles + source data panel
 ```
 
 ---
@@ -174,22 +180,43 @@ You do not need to touch any other file to change prompt behavior.
 
 ---
 
-### `pipeline/agent.py` — The LangChain Chain
+### `pipeline/agent.py` — The LangGraph Agent (Bank-Standard Pattern)
 
-**What it is:** Builds the LLM call and runs it. You rarely need to edit this file.
+**What it is:** Builds the LLM call using the bank-standard LangGraph pattern
+from the AICE cookbook. Also builds the Azure OpenAI client directly inside
+this file (there is no separate `llm.py` anymore).
 
-**What it does:**
-1. Gets the system prompt for the current mode (from `prompts.py`)
-2. Builds a LangChain `ChatPromptTemplate` with system + human messages
-3. Builds the LLM client (from `llm.py`)
-4. Assembles the chain: `prompt | llm | output_parser`
-5. Calls `chain.invoke()` with the user question and data context
-6. Returns `{ "narrative": "..." }`
+**You rarely need to edit this file.** It follows a template that your bank's
+code reviewers will recognize — deviating from it makes deployment review harder.
+
+**What's inside (roughly in order from top of file):**
+
+1. **`Claim` and `NarrativeResponse` (Pydantic models)** — the shape the LLM
+   is forced to return. `NarrativeResponse.narrative` is the text; `claims` is
+   the list that populates the Claims tab.
+2. **`MlflowConfigAgentContext` + `Context` (Pydantic)** — runtime params
+   (model name, temperature, api_version). Defaults come from environment
+   variables. This is the cookbook pattern — do not modify `MlflowConfigAgentContext`.
+3. **`State` (Pydantic)** — the data that flows through the graph: `messages`,
+   `context_data`, `mode`, `narrative`, `claims`.
+4. **`create_llm()`** — builds the `AzureChatOpenAI` client using
+   `DefaultAzureCredential` + bearer token. No API key.
+5. **`HUMAN_TEMPLATE`** — how the user's question and portfolio data are
+   presented to the LLM in the "human" turn.
+6. **`narrate()` + `anarrate()`** — the graph node (sync + async). Builds the
+   prompt, calls the LLM with structured output, falls back to plain text if
+   the LLM returns non-compliant JSON.
+7. **`load_graph()`** — compiles the StateGraph. One node today: `narrate`.
+8. **`ask_agent(context, user_prompt, mode)`** — the Flask-facing entry point.
+   `server.py` calls this. Returns `{ narrative, claims }`.
+9. **`LangGraphResponsesAgent`** — MLflow-compatible wrapper. Not called by
+   Flask at runtime today — present so this file can be logged as an MLflow
+   model later (for AICE Studio deployment).
+10. **`mlflow.models.set_model(...)`** — bottom of the file. Registers the
+    agent for MLflow model-from-code logging. Inert unless MLflow is logging
+    this file.
 
 **The human-turn template (`HUMAN_TEMPLATE`):**
-
-This controls how the user question and data are presented to the LLM in the
-"human" part of the conversation (as opposed to the "system" instructions):
 
 ```python
 HUMAN_TEMPLATE = """{user_question}
@@ -203,28 +230,7 @@ Portfolio Data:
 `{user_question}` is filled with the user's question or canned prompt text.
 `{context}` is filled with the string returned by `analyze()`.
 
-**To customize:**
-- Edit `HUMAN_TEMPLATE` if you want to restructure how data is presented
-  (e.g. add a "Prior Period Comparison:" section, or request JSON output format)
-- Generally do not change anything else in this file
-
----
-
-### `pipeline/llm.py` — The Azure OpenAI Connection
-
-**What it is:** Builds and returns the Azure OpenAI LLM client. This is the only
-file that handles authentication and model configuration.
-
-**How authentication works:**
-
-No API key is required. The app uses Azure AD (Active Directory) managed identity:
-
-- **Locally:** Runs `az login` in your terminal once, then the app picks up your
-  credentials automatically every time. No code change needed.
-- **On Domino:** The compute environment has a managed identity attached.
-  The app detects it automatically. No code change needed.
-
-**Environment variables this file reads:**
+**Environment variables this file reads (via `create_llm()`):**
 
 | Variable | Required | Example | Notes |
 |---|---|---|---|
@@ -232,27 +238,63 @@ No API key is required. The app uses Azure AD (Active Directory) managed identit
 | `OPENAI_API_VERSION` | Yes | `2025-04-01-preview` | Must use `api_version=`, not `openai_api_version=` |
 | `AZURE_OPENAI_ENDPOINT` | Optional | `https://your-resource.openai.azure.com/` | Omit on Domino — proxy injects it |
 
-**Setting env vars locally:**
-
-Option A — in your shell before running:
-```bash
-export AZURE_OPENAI_DEPLOYMENT=gpt-4o
-export OPENAI_API_VERSION=2025-04-01-preview
-export AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-python server.py
-```
-
-Option B — create a `.env` file (add `python-dotenv` to requirements.txt and
-load it at the top of `server.py`):
-```
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-OPENAI_API_VERSION=2025-04-01-preview
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-```
+**Authentication:** No API key. Uses Azure AD:
+- **Locally:** `az login` once in your terminal. The app picks up your session.
+- **On Domino:** Managed identity attached to the compute environment. Automatic.
 
 **What you might change:**
-- `temperature=0` on line ~70. Raise to 0.3–0.7 if you want more varied language.
-  0 = maximally consistent/deterministic output.
+- `HUMAN_TEMPLATE` — if you want to restructure how data is presented to the LLM
+- `Context.temperature` default — raise from 0.0 if you want more varied language
+- `Claim` Field descriptions — these are the instructions the LLM sees for what
+  each claim field should contain
+
+**What NOT to touch:**
+- `MlflowConfigAgentContext` — cookbook pattern, copied verbatim
+- `LangGraphResponsesAgent` — cookbook pattern for MLflow deployment
+- The `mlflow.models.set_model(...)` call at the bottom
+
+---
+
+### `pipeline/tracking.py` — MLflow Audit Logging (Kill Switch Included)
+
+**What it is:** The MLflow observability layer. Logs every `/upload` request
+as an MLflow run for production audit and compliance. **It is OFF by default.**
+
+**Why it's off by default:** The bank's MLflow runs on Databricks via the
+internal `aice-mlflow-plugins` package. Until that access is provisioned for
+your user, we don't want the app attempting to connect at startup. When your
+access is ready, flip one environment variable and everything activates.
+
+**How to turn it on:**
+
+```bash
+export KRONOS_MLFLOW_ENABLED=true
+export MLFLOW_EXPERIMENT_NAME=kronos-dev    # or kronos-prod at deployment
+pip install aice-mlflow-plugins==0.1.3       # internal bank package
+```
+
+Then restart the Flask app.
+
+**What gets logged per request (when enabled):**
+
+| What | Values |
+|---|---|
+| Tags | `kronos.mode` (e.g. portfolio-summary), `kronos.component` (upload) |
+| Params | `user_prompt` (truncated), `file_name` |
+| Metrics | `file_size_bytes`, `context_length`, `narrative_length`, `claims_count`, `verified_count`, `unverified_count`, `latency_ms` |
+| Artifacts | `context_sent.txt` — the exact data string the LLM saw |
+| Auto traces | Full LangChain invocation trace via `mlflow.langchain.autolog()` — prompt, response, token counts |
+
+**Safety:** Every MLflow call is wrapped in try/except. If tracking fails mid-request,
+the user still gets their analysis — the app logs a warning but does not 500.
+
+**What you might change:**
+- Add more logged fields to the `mlflow_run()` context manager in this file
+- Adjust truncation limits on params
+
+**What NOT to touch:**
+- The kill-switch logic — that's the whole point of this file
+- The lazy imports — they protect the app when mlflow isn't available
 
 ---
 
@@ -313,16 +355,29 @@ That's it. The button appears automatically on next page load.
 **Current contents:**
 
 ```
-flask               — web server
-pandas              — Excel/CSV reading
-openpyxl            — pandas Excel support
-langchain==0.3.27   — LangChain framework
-langchain-openai==0.3.33  — Azure OpenAI LangChain integration
-azure-identity==1.25.0    — Azure AD authentication
+flask                           — web server
+pandas                          — Excel/CSV reading
+openpyxl                        — pandas Excel support
+langchain==0.3.27               — LangChain framework
+langchain-openai==0.3.33        — Azure OpenAI LangChain integration
+langgraph==0.6.7                — LangGraph StateGraph (bank-standard agent pattern)
+langgraph-checkpoint==2.1.1     — LangGraph state persistence (for future multi-turn)
+azure-identity==1.25.0          — Azure AD authentication
+mlflow[databricks]==3.7.0       — Production observability / compliance logging
 ```
 
-**Important:** `langchain` and `langchain-openai` are pinned to specific versions
-because they change APIs frequently. Do not upgrade them without testing.
+**Not on PyPI — install separately in your bank Python environment:**
+```
+aice-mlflow-plugins==0.1.3      — internal bank package, enables MLflow routing
+                                   to Databricks. Follow AICE onboarding docs.
+                                   KRONOS runs without it (with a warning) so
+                                   initial deployment isn't blocked.
+```
+
+**Important:** `langchain`, `langchain-openai`, `langgraph`, and `mlflow` are
+pinned to the versions from the bank's AICE LangGraph cookbook. They are tested
+as a set. Do not upgrade any one in isolation without testing — they ship
+breaking API changes.
 
 **On Domino:** Declare these in the project environment configuration, not
 installed manually via pip.
@@ -437,6 +492,39 @@ Delete the 3 marked locations (getMockResult function and its two call sites).
 
 ---
 
+### Step 6 — Turn on MLflow tracking (when Databricks access is ready)
+
+MLflow is built in but DORMANT. It will not attempt any network calls until
+the kill-switch env var is set. This lets you deploy before your bank AICE
+access is provisioned.
+
+When your Databricks / AICE access is ready:
+
+1. Install the internal package in your environment:
+   ```bash
+   pip install aice-mlflow-plugins==0.1.3
+   ```
+
+2. Set the env vars (locally or in Domino project settings):
+   ```bash
+   export KRONOS_MLFLOW_ENABLED=true
+   export MLFLOW_EXPERIMENT_NAME=kronos-dev
+   ```
+   (Switch to `kronos-prod` when you move from dev to prod.)
+
+3. Restart the Flask app.
+
+4. Submit a test request. Check that a new run appears in Databricks MLflow
+   under your experiment. You should see tags, params, metrics, and an
+   auto-captured LangChain trace.
+
+If step 4 fails, check logs for the `MLflow activation failed` warning — this
+tells you the activation error without crashing the app. Most common cause:
+Domino compute environment can't reach your Databricks workspace. Talk to
+your AICE admin.
+
+---
+
 ## Frequently Asked Questions
 
 **Q: Where do I put my wrapper prompt?**
@@ -450,7 +538,24 @@ to `MODE_SYSTEM_PROMPTS` in `pipeline/prompts.py`.
 
 **Q: How do I change which model is used?**
 A: Set the `AZURE_OPENAI_DEPLOYMENT` environment variable. Or change the default
-in `pipeline/llm.py` line: `deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")`.
+in `pipeline/agent.py` on the `Context` class (look for
+`model: Optional[str] = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")`).
+
+**Q: Where did `pipeline/llm.py` go?**
+A: It was removed during the bank-standard refactor. The Azure OpenAI client
+is now built inside `pipeline/agent.py` via the `create_llm()` function — this
+matches the AICE LangGraph cookbook pattern. Same behavior, same env vars, just
+one less file to hop through.
+
+**Q: How do I turn on MLflow tracking?**
+A: Set `KRONOS_MLFLOW_ENABLED=true` and optionally `MLFLOW_EXPERIMENT_NAME=kronos-dev`.
+Install `aice-mlflow-plugins==0.1.3` in your bank Python environment. Restart
+the app. See Step 6 in the integration guide for details.
+
+**Q: What if MLflow can't reach Databricks from Domino?**
+A: The activation wraps everything in try/except — you'll get a warning log
+(`MLflow activation failed`) at startup and the app will run without tracking.
+Requests still succeed. Talk to your AICE admin to get the networking sorted.
 
 **Q: Why is the tile panel showing "Field Averages (Placeholder)"?**
 A: Your real processor isn't wired yet. The placeholder processor generates basic
@@ -477,19 +582,22 @@ A: No — and don't. The `.gitignore` excludes `.env` files. Never commit creden
 
 ```
 kronos/
-  server.py                  ← START HERE — orchestrator, /upload route
+  server.py                  ← START HERE — orchestrator, /upload route,
+                                activates MLflow, wraps request in mlflow_run
   app.sh                     ← Domino entry point (don't touch)
   requirements.txt           ← Python dependencies
   EXPLAINME.md               ← This file
-  CLAUDE.md                  ← AI assistant context (not for you to edit)
+  claude.md                  ← AI assistant context (not for you to edit)
   aboutme.md                 ← Integration guide for AI handoffs
 
   pipeline/
     __init__.py              ← Python package marker (don't touch)
-    llm.py                   ← Azure OpenAI connection + auth
     prompts.py               ← EDIT THIS — wrapper prompts, per-mode prompts
-    agent.py                 ← LangChain chain (rarely needs editing)
+    agent.py                 ← LangGraph + ResponsesAgent (bank-standard; rarely edit)
+                                Also builds the Azure OpenAI client (create_llm)
     analyze.py               ← EDIT THIS — register your processor scripts here
+    validate.py              ← Number cross-check for verification badge
+    tracking.py              ← MLflow audit logging (off by default, kill-switch)
 
   static/
     index.html               ← UI structure
@@ -502,3 +610,7 @@ kronos/
 1. `pipeline/prompts.py` — your wrapper prompts
 2. `pipeline/analyze.py` — your processor script registrations
 3. `static/prompts.json` — your canned button definitions
+
+**The file you'll edit once:** `pipeline/tracking.py` — only when you want to
+change what gets logged to MLflow (add a metric, change truncation, etc.).
+The kill-switch itself doesn't need editing — it's driven by env vars.

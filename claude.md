@@ -1,0 +1,386 @@
+# KRONOS — Project Summary
+
+## What We're Building
+
+**KRONOS** is an internal credit portfolio intelligence tool that:
+
+1. Accepts an Excel file upload (`.xlsx`, `.xls`, `.csv`)
+2. Routes to a mode-specific deterministic Python processor script based on the user's selected analysis type
+3. The processor produces `deterministic_narrative_payload` (primary LLM input), `raw_results`, and `metrics`
+4. Passes the payload to a **LangGraph StateGraph** (`pipeline/agent.py`) which narrates via Azure OpenAI using `DefaultAzureCredential` bearer token auth (no API key)
+5. Returns structured output (narrative + claims citations) with number cross-check verification
+6. Logs every request to MLflow (audit / compliance) when `KRONOS_MLFLOW_ENABLED=true` — gated off by default until Databricks / AICE access is provisioned
+7. Displays the narrative, claims tab, verification badge, data-used panel, and summary metric tiles in a custom HTML/CSS/JS UI served by Flask
+
+---
+
+## Tech Stack
+
+| Layer | Choice | Notes |
+|---|---|---|
+| Frontend | HTML / CSS / JS | Full design control, no framework constraints |
+| Backend | Flask | Serves static files + handles `/upload` API route |
+| Hosting | Domino Data Lab | Published app via `app.sh` entry point, port 8888 |
+| Excel parsing | `pandas` + `openpyxl` | Standard Python stack |
+| LLM framework | **LangGraph** (`langgraph==0.6.7`, `langgraph-checkpoint==2.1.1`) + LangChain (`langchain==0.3.27`, `langchain-openai==0.3.33`) | `StateGraph` with a `narrate` node that wraps `AzureChatOpenAI` with structured output |
+| LLM auth | `azure-identity==1.25.0` | `DefaultAzureCredential` + bearer token. `az login` locally, managed identity on Domino |
+| LLM model | Azure OpenAI | Via `AzureChatOpenAI` with `with_structured_output()` inside the narrate node |
+| Observability | **MLflow** (`mlflow[databricks]==3.7.0`) + `aice-mlflow-plugins==0.1.3` (internal) | Gated by `KRONOS_MLFLOW_ENABLED` env var. Databricks backend via AICE plugin. Trace capture via `mlflow.langchain.autolog()` |
+| Serving pattern | **`ResponsesAgent`** (MLflow pyfunc) | Bank-standard for logging agents as deployable models. Registered via `mlflow.models.set_model()` at the bottom of `pipeline/agent.py` |
+
+**Why Flask, not Streamlit:** Full design control for custom layout, animations, multi-turn chat, drag-and-drop. Flask serves HTML/JS as static files and exposes a clean REST API.
+
+**Why LangGraph + ResponsesAgent:** Bank-standard pattern from the AICE LangGraph cookbook. Enables future AICE Studio deployment as a served model without rewriting the agent.
+
+---
+
+## Architecture
+
+```
+/kronos
+  app.sh                  ← Domino entry point (runs server.py on port 8888)
+  server.py               ← Flask app: static files + /upload route (orchestrator)
+                             Calls activate_mlflow() at import, wraps /upload in mlflow_run()
+  requirements.txt        ← flask, pandas, openpyxl, langchain, langchain-openai,
+                             langgraph, langgraph-checkpoint, azure-identity, mlflow[databricks]
+  EXPLAINME.md            ← Plain-English integration guide for non-developers
+  VSCODE_CHEATSHEET.md    ← VS Code navigation shortcuts for Python tracing
+  /static
+    index.html            ← Main UI
+    styles.css            ← Full design system + dark mode
+    main.js               ← All frontend interactions + fetch() calls to Flask
+    prompts.json          ← Canned prompt definitions (modular — edit to add/remove buttons)
+  /pipeline
+    __init__.py           ← Package marker (empty)
+    analyze.py            ← Dispatcher: maps mode slug → correct processor script
+                             Includes placeholder_processor() for dev/demo
+    agent.py              ← LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code)
+                             • State, Context, MlflowConfigAgentContext (pydantic)
+                             • create_llm() — AzureChatOpenAI with DefaultAzureCredential
+                             • narrate() / anarrate() — sync + async nodes with structured output
+                             • load_graph() — builds StateGraph
+                             • ask_agent() — Flask-facing entry point
+                             • LangGraphResponsesAgent — MLflow model wrapper
+                             • mlflow.models.set_model(...) — model-from-code registration
+    tracking.py           ← MLflow tracking layer — GATED by KRONOS_MLFLOW_ENABLED
+                             • activate_mlflow() — called once at app import
+                             • mlflow_run() — context manager around each /upload
+                             • _NoOpRun / _ActiveRun — dual-mode run handle
+    prompts.py            ← All LLM prompts: global SYSTEM_PROMPT + per-mode MODE_SYSTEM_PROMPTS
+    validate.py           ← cross_check_numbers(): compares narrative figures vs source data
+```
+
+**Note:** `pipeline/llm.py` was removed — LLM construction is now inline in `pipeline/agent.py` (`create_llm()`), which is the bank-standard pattern per the AICE cookbook.
+
+### Real Codebase Mapping (existing Domino app → KRONOS)
+
+| Existing file | Role in KRONOS |
+|---|---|
+| `processor.py` | `pipeline/analyze.py` dispatcher + individual processor scripts registered in `SCRIPT_MAP` |
+| `agent_client.py` | Replaced by `pipeline/agent.py` (LangGraph StateGraph + ResponsesAgent wrapper) |
+| `workbook_agent.py` | Replaced by `create_llm()` inside `pipeline/agent.py` |
+| `kronos/llm/prompts/prompts.py` | Replaced by `pipeline/prompts.py` (`SYSTEM_PROMPT` + `MODE_SYSTEM_PROMPTS`) |
+| `main.py` (Streamlit) | Replaced by `server.py` (Flask) + `static/main.js` (frontend) |
+| (new in KRONOS) | `pipeline/tracking.py` — MLflow audit logging with kill switch |
+
+### API Route
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/` | Serves `index.html` |
+| `POST` | `/upload` | Receives file + prompt + mode, runs pipeline, returns JSON |
+
+### POST /upload Response Shape
+
+```json
+{
+  "narrative":    "string — LLM-generated analysis text",
+  "metrics":      { "Section Name": [{ "label": "...", "value": "...", "delta": "...", "sentiment": "positive|negative|warning|neutral" }] },
+  "claims":       [{ "sentence": "...", "source_field": "...", "cited_value": "..." }],
+  "context_sent": "string — exact data payload the LLM received",
+  "verification": { "total": 14, "verified_count": 11, "unverified_count": 3, "unverified": ["..."], "all_clear": false }
+}
+```
+
+All fields except `narrative` are optional — the frontend uses optional chaining on each.
+
+### Data Flow
+
+```
+User uploads file + selects mode + enters prompt
+      ↓
+POST /upload  (multipart/form-data: file, prompt, mode)
+      ↓
+server.py
+  └─ with mlflow_run(mode, file_name, file_size, user_prompt) as run:   ← pipeline/tracking.py
+        (no-op when KRONOS_MLFLOW_ENABLED is unset)
+        ↓
+        analyze(file, mode)                          ← pipeline/analyze.py
+          └─ routes via SCRIPT_MAP to processor (or placeholder_processor if not registered)
+          └─ returns { context, metrics }
+        ↓
+        ask_agent(context, prompt, mode)             ← pipeline/agent.py
+          └─ _get_graph() — cached CompiledStateGraph
+          └─ graph.invoke({ messages, context_data, mode })
+               └─ narrate() node
+                    └─ get_system_prompt(mode)       ← pipeline/prompts.py
+                    └─ create_llm()                  ← AzureChatOpenAI + bearer token
+                    └─ llm.with_structured_output(NarrativeResponse)
+                                                     → narrative + claims list
+                                                     OR plain text fallback → claims = []
+          └─ returns { narrative, claims }
+          └─ (autolog captures chain trace if MLflow active)
+        ↓
+        cross_check_numbers(narrative, context)      ← pipeline/validate.py
+          └─ returns { total, verified_count, unverified_count, unverified[], all_clear }
+        ↓
+        run.log(metrics)                             ← logs latency, counts, artifacts
+      ↓
+server.py returns { narrative, metrics, claims, context_sent, verification }
+      ↓
+main.js renders:
+  - Analysis tab (narrative text)
+  - Claims tab (structured citation cards)
+  - Verification badge (green=all verified, amber=some unverified)
+  - "View source data" expandable panel
+  - Data Snapshot metric tiles
+```
+
+### `mode` Routing
+
+Every request carries a `mode` slug (e.g. `"portfolio-summary"`) sent from the frontend. `pipeline/analyze.py` maps this to the correct processor script via `SCRIPT_MAP`. Mode slugs must match the `"mode"` field in `static/prompts.json`.
+
+Custom questions (no canned button selected) send `mode = ''` — `analyze()` falls back to `placeholder_processor()`.
+
+### Environment Variables
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `AZURE_OPENAI_DEPLOYMENT` | Yes | `gpt-4o` | Model deployment name |
+| `OPENAI_API_VERSION` | Yes | `2025-04-01-preview` | Use `api_version=` not `openai_api_version=` |
+| `AZURE_OPENAI_ENDPOINT` | Optional | — | Omit on Domino (proxy injects it) |
+| `KRONOS_MLFLOW_ENABLED` | Optional | unset (off) | Set to `true` to activate MLflow tracking |
+| `MLFLOW_EXPERIMENT_NAME` | Optional | `kronos-dev` | Experiment name. Use `kronos-prod` at deployment |
+
+Auth: `DefaultAzureCredential` — `az login` locally, managed identity on Domino. No API key.
+
+---
+
+## MLflow Tracking Layer (`pipeline/tracking.py`)
+
+**Default state: OFF.** The MLflow packages install but do nothing at runtime unless `KRONOS_MLFLOW_ENABLED=true`. This lets KRONOS deploy before Databricks / AICE access is provisioned.
+
+### Activation
+
+```bash
+# Flip the kill switch (do this once you have Databricks access):
+export KRONOS_MLFLOW_ENABLED=true
+export MLFLOW_EXPERIMENT_NAME=kronos-dev       # or kronos-prod
+pip install aice-mlflow-plugins==0.1.3          # internal bank package
+```
+
+`activate_mlflow()` is called once at `server.py` import. It:
+1. Sets `mlflow.set_tracking_uri("databricks")`
+2. Sets `mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)`
+3. Calls `mlflow.langchain.autolog()` for automatic chain trace capture
+4. Logs a warning (but does not crash) if `aice_mlflow_plugins` import fails
+
+### What gets logged per request
+
+| Type | Key | Value |
+|---|---|---|
+| Tag | `kronos.mode` | e.g. `portfolio-summary` or `custom` |
+| Tag | `kronos.component` | `upload` |
+| Param | `user_prompt` | Truncated to 250 chars |
+| Param | `file_name` | Uploaded filename |
+| Metric | `file_size_bytes` | File size in bytes |
+| Metric | `context_length` | Length of data string sent to LLM |
+| Metric | `narrative_length` | Length of narrative returned |
+| Metric | `claims_count` | Number of structured claims |
+| Metric | `verified_count` | Numbers in narrative found in source |
+| Metric | `unverified_count` | Numbers not in source (may be calculated) |
+| Metric | `latency_ms` | End-to-end request latency |
+| Artifact | `context_sent.txt` | Exact string the LLM saw (audit) |
+| Auto trace | LangChain chain | Prompt, response, tokens (via `autolog()`) |
+
+### Safety
+
+Every MLflow call is wrapped in try/except. A tracking failure never surfaces as a 500 to the user — it logs a warning and the request continues. We'd rather lose a log line than crash the app.
+
+---
+
+## UI — Current State
+
+### Design System
+- **Fonts:** DM Sans (UI) + DM Mono (brand, values, timestamps, code)
+- **Accent:** Blueprint blue `#1C4ED8` — focus rings, active states, file badge, pipeline dots
+- **CTA:** Muted wine red `#8B2C35` — Run Analysis button only (separate `--cta` token)
+- **Banner:** Dark charcoal grey `#2B2E35`
+- **Page bg:** `#EDEEF2` (light blue-grey)
+- **Dark mode:** Full `prefers-color-scheme: dark` implementation
+
+### Layout
+- **Input state:** Single unified card, `max-width: 680px`, centered
+- **Loading state:** Pipeline card, `max-width: 480px`, centered
+- **Results state:** Two-column grid `1.4fr / 1fr` (narrative left, data snapshot right)
+- Responsive breakpoints at 860px and 480px
+
+### Input Panel (Unified Card)
+1. **Quick Analysis** — 2×3 grid of canned prompt buttons from `prompts.json`
+2. **"or write your own question"** divider
+3. **Chat area** — auto-growing textarea with drag-drop file attach
+4. **File attachment strip** — format badge, filename, size, ✕ remove
+
+### Results Panel — Narrative Column
+- **Tab bar** — "Analysis | Claims (N)" toggle above the narrative text
+- **Analysis tab** — LLM narrative dumped immediately (no typewriter)
+- **Claims tab** — structured citation cards, each showing: quoted sentence, source field badge, cited value. Empty state shown if structured output fell back to plain text
+- **Verification badge** — inline in message-meta. Green ("all in source data") or amber ("N of M figures not in source data"). Hover shows which values are unverified. Unverified = may be calculated (e.g. weighted average PD) — it's a transparency signal, not a correctness gate
+- **"View source data sent to AI"** — expandable panel showing exact `context` string the LLM received
+- **Copy button** — copies plain text to clipboard
+
+### Results Panel — Data Snapshot Column
+- Metric cards in grid, grouped by section, stagger-animated
+- Tile color by `sentiment`: `positive` → green, `negative` → red, `warning` → amber, `neutral` → grey
+- Fully dynamic — rendered from whatever `metrics` object the API returns
+
+### Multi-turn Chat (Follow-up)
+- **FAB** (`+` button) — fixed bottom-right, appears after first response
+- **Follow-up input** — slides into narrative column, submits via Send or `Cmd/Ctrl+Enter`
+- **Thread structure** — divider → thinking dots → message block with label + timestamp
+- **Metrics update** — follow-up with new metrics re-renders the Data Snapshot panel
+
+Note: follow-ups currently hit stateless `/upload`. When true multi-turn state is needed, LangGraph's checkpointing capability is already installed — just add a checkpointer to `load_graph()` and a `thread_id` per session.
+
+---
+
+## `prompts.json` — Modular Canned Prompts
+
+Buttons rendered from `static/prompts.json`. To add/remove/edit buttons, only touch this file:
+
+```json
+{
+  "title": "Button Label",
+  "desc": "Subtitle",
+  "mode": "mode-slug",
+  "prompt": "Full prompt text sent to the LLM"
+}
+```
+
+`mode` slug must match: `SCRIPT_MAP` key in `pipeline/analyze.py` AND `MODE_SYSTEM_PROMPTS` key in `pipeline/prompts.py`.
+
+Current slugs: `portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`.
+
+---
+
+## Transparency Layer
+
+Three features for output validation and traceability:
+
+### 1. Structured Claims (Claims Tab)
+`pipeline/agent.py` uses `llm.with_structured_output(NarrativeResponse)` inside the narrate node. Forces the LLM to return narrative + a list of factual claims, each citing its source field and value. Falls back to plain `llm.invoke()` if the model doesn't comply — the narrative always renders, claims tab shows empty state.
+
+### 2. Number Cross-Check (Verification Badge)
+`pipeline/validate.py` extracts all numeric tokens from the narrative and checks whether each appears in the `context` string. Returns counts of verified vs unverified figures. Unverified doesn't mean wrong — calculated metrics (weighted averages, deltas) won't appear verbatim in source data.
+
+### 3. Data Used Panel (Source Data Expandable)
+The API returns `context_sent` — the exact string the LLM analyzed. Rendered as a collapsible monospace panel below the narrative. Users can see exactly what data the AI had access to.
+
+---
+
+## Bank-Standard Deployment Pattern
+
+`pipeline/agent.py` follows the AICE LangGraph + MLflow cookbook:
+- **`ResponsesAgent`** wrapper (from `mlflow.pyfunc`) — enables model-from-code logging
+- **`CompiledStateGraph`** — the LangGraph graph being wrapped
+- **`mlflow.models.set_model(LangGraphResponsesAgent(_get_graph()))`** at module bottom — registers the agent for `mlflow.pyfunc.log_model(python_model="pipeline/agent.py")`
+- **`MlflowConfigAgentContext` + `Context`** — runtime params via pydantic with env var defaults
+- **`RunnableCallable(narrate, anarrate)`** — sync + async node variants
+
+Today Flask calls `ask_agent()` directly (no MLflow serving). When ready to deploy as a served model to AICE Studio, no code changes — just `mlflow.pyfunc.log_model(python_model="pipeline/agent.py")` and register the run with AICE.
+
+---
+
+## Payload Architecture (Key Design Decision)
+
+Three objects flow through the pipeline:
+
+| Object | Size | Role | Status |
+|---|---|---|---|
+| `raw_results` | Large | Full deterministic JSON output | Keep as secondary payload |
+| `commentary_facts` | Small | Original reduced narrative subset | Keep for backward compat — no longer primary LLM input |
+| `deterministic_narrative_payload` | Medium | **Primary LLM input** — mode-scoped, richer than `commentary_facts` | Build this in `processor.py` |
+
+Currently `pipeline/analyze.py` has a `placeholder_processor()` that reads any Excel/CSV with pandas and produces a basic data summary. This lets the app run end-to-end before real processor scripts are registered.
+
+---
+
+## Mock Data / Demo Mode
+
+`main.js` falls back to `getMockResult()` when the backend is unreachable. Allows full UI demo without a live backend.
+
+**Remove on merge (3 locations marked `TODO REMOVE ON MERGE`):**
+1. `getMockResult()` function at bottom of `main.js`
+2. `|| getMockResult()` fallback in `runAnalysis()`
+3. `getMockResult().narrative` fallback in `submitFollowup()`
+
+Also safe to delete: `typewrite()` function (unused).
+
+---
+
+## Domino-Specific Notes
+
+- App published via **`app.sh`** — starts Flask on port **8888**
+- Domino proxies the URL and handles auth — no login needed inside the app
+- All JS `fetch()` calls are **same-origin**
+- **Do not rely on ephemeral disk storage** — write to `/domino/datasets` for persistent files
+- Environment variables set in Domino project settings (no `.env` file committed)
+- Auth: managed identity on Domino (no `az login` needed there)
+- **MLflow from Domino:** requires Domino can reach Databricks. User confirmed Domino→Databricks networking is expected to work, but their AICE access wasn't set up yet as of 2026-04-20 — hence the kill switch on MLflow
+
+---
+
+## GitHub
+
+- **Repo:** `https://github.com/ordinarystephen/workprojects.git`
+- **Branch:** `kronos` — all project files are on this branch
+
+---
+
+## Status
+
+### Done
+- [x] `server.py` — Flask app, `/upload` route fully wired: `analyze()` → `ask_agent()` → `cross_check_numbers()` → JSON, wrapped in `mlflow_run()`
+- [x] `app.sh` — Domino entry point
+- [x] `index.html` — Full UI markup
+- [x] `styles.css` — Complete design system with dark mode + responsive + transparency layer styles
+- [x] `main.js` — All interactions: drag-drop, canned prompts, mode routing, pipeline animation, metric rendering, multi-turn chat, copy button, Analysis/Claims tabs, verification badge, data-used panel, mock fallback
+- [x] `prompts.json` — Modular canned prompts with mode slugs
+- [x] `pipeline/analyze.py` — Dispatcher with `SCRIPT_MAP` + working `placeholder_processor()` for dev/demo
+- [x] `pipeline/agent.py` — **LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code pattern)** with `with_structured_output(NarrativeResponse)` inside the narrate node + plain text fallback
+- [x] `pipeline/tracking.py` — **MLflow tracking layer gated by `KRONOS_MLFLOW_ENABLED`** (off by default). Logs tags, params, metrics, artifacts per request. Wraps `mlflow.start_run()` + `autolog()`
+- [x] `pipeline/prompts.py` — Global `SYSTEM_PROMPT` + per-mode `MODE_SYSTEM_PROMPTS` with TODO placeholders
+- [x] `pipeline/validate.py` — `cross_check_numbers()` numeric token cross-check
+- [x] `requirements.txt` — flask, pandas, openpyxl, langchain, langchain-openai, **langgraph, langgraph-checkpoint**, azure-identity, **mlflow[databricks]**
+- [x] `EXPLAINME.md` — Plain-English walkthrough of every file + integration steps
+- [x] `VSCODE_CHEATSHEET.md` — Python import tracing + VS Code navigation shortcuts
+- [x] `aboutme.md` — Full integration guide with real architecture, checklist, work AI prompt
+- [x] Git repo initialized, pushed to GitHub `kronos` branch
+- [x] Narrative text dumps immediately (no typewriter delay)
+- [x] `mode` field wired end-to-end: `prompts.json` → button → `activeMode` → `formData` → server → `SCRIPT_MAP`
+- [x] Bank-standard production pattern: LangGraph + ResponsesAgent + MLflow autolog (dormant)
+
+### Still To Do
+- [ ] Install `aice-mlflow-plugins==0.1.3` in the bank Python environment (internal package)
+- [ ] Confirm Domino can reach Databricks MLflow from the KRONOS compute environment
+- [ ] Flip `KRONOS_MLFLOW_ENABLED=true` when Databricks / AICE access is provisioned
+- [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace TODO placeholders)
+- [ ] Port `processor.py` into KRONOS — register modes in `SCRIPT_MAP`, ensure return shape matches `{ context, metrics }`
+- [ ] Build `deterministic_narrative_payload` in `processor.py` — mode-scoped, replaces `commentary_facts` as primary LLM input
+- [ ] Remove mock data fallback from `main.js` (3 locations marked `TODO REMOVE ON MERGE`)
+- [ ] Update `prompts.json` with real mode slugs and prompt language for actual use cases
+- [ ] Test with real `.xlsx` files end-to-end
+- [ ] Test follow-up turns with metrics update
+- [ ] Test structured claims output with real processor data
+- [ ] Deploy and smoke test on Domino
+- [ ] (Future) Register KRONOS as AICE Studio served model via `mlflow.pyfunc.log_model(python_model="pipeline/agent.py")`

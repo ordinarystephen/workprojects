@@ -2,7 +2,8 @@
 # Install with: pip install -r requirements.txt
 #
 # On Domino: declare these in the project environment config.
-# Match versions exactly to avoid compatibility issues.
+# Match versions exactly — the bank's AICE cookbook pins them
+# because langchain/langgraph/mlflow ship breaking API changes.
 # ──────────────────────────────────────────────────────────────
 
 # ── Web framework ─────────────────────────────────────────────
@@ -12,13 +13,37 @@ flask
 pandas
 openpyxl          # required by pandas to read .xlsx files
 
-# ── LangChain + Azure OpenAI ──────────────────────────────────
-# Pinned versions — these three must stay in sync.
-# Do not upgrade langchain-openai without checking langchain compat.
+# ── LangChain + LangGraph + Azure OpenAI ──────────────────────
+# Pinned to the versions in the AICE LangGraph cookbook.
+# Do not upgrade any of these four together — they are tested
+# as a set. Upgrading one in isolation breaks imports.
 langchain==0.3.27
 langchain-openai==0.3.33
+langgraph==0.6.7
+langgraph-checkpoint==2.1.1
 
 # ── Azure authentication ──────────────────────────────────────
 # DefaultAzureCredential: uses `az login` locally, managed identity on Domino.
 # No API key needed — auth is handled via Azure AD bearer token.
 azure-identity==1.25.0
+
+# ── MLflow tracking + Databricks backend ──────────────────────
+# Used for production observability and compliance logging.
+# Tracking is GATED behind the KRONOS_MLFLOW_ENABLED env var —
+# the package installs but does nothing at runtime unless the
+# flag is set to "true" (see pipeline/tracking.py).
+#
+# Switch it on once your Databricks / AICE access is provisioned:
+#   export KRONOS_MLFLOW_ENABLED=true
+mlflow[databricks]==3.7.0
+
+# ── Internal package (install separately) ─────────────────────
+# aice-mlflow-plugins==0.1.3
+#
+# This is an internal bank package (auto-discovery of tracking
+# store, host routing, user attribution). It cannot be installed
+# from public PyPI. Install it in your bank Python environment
+# following the AICE onboarding docs.
+#
+# KRONOS imports are defensive: if the plugin isn't present, MLflow
+# falls back gracefully and logs a warning but does not crash.
