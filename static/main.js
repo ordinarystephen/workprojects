@@ -12,14 +12,21 @@
  *   Pipeline          — loading animation + API call orchestration
  *   Results           — renders narrative and metric tiles
  *   Follow-up FAB     — floating + button and follow-up chat thread
- *   Mock Data         — REMOVE ON MERGE (fallback for demo without backend)
+ *   Mock Data         — getMockResult() + USE_MOCK_RESULTS demo toggle
  *
- * ── WHAT TO REMOVE WHEN MERGING ──────────────────────────────
- *   1. getMockResult() function at the bottom of this file — entire block
- *   2. The `|| getMockResult()` fallback in runAnalysis() — marked below
- *   3. The getMockResult().narrative fallback in submitFollowup() — marked below
- *   Nothing else in this file needs to change for the pipeline merge.
+ * ── DEMO MODE ────────────────────────────────────────────────
+ * Set USE_MOCK_RESULTS = true (below) to bypass the Flask backend
+ * and render hard-coded results from getMockResult(). Intended for
+ * presentations / demos when a live backend isn't available.
+ * Default is false: the app talks to POST /upload and surfaces any
+ * error (network, server, validation) instead of silently faking it.
  * ────────────────────────────────────────────────────────────── */
+
+
+// ── Demo mode toggle ──────────────────────────────────────────
+// Flip to true to render getMockResult() instead of calling the
+// backend. Used for UI demos without a live Flask server.
+const USE_MOCK_RESULTS = false;
 
 
 // ── DOM refs ──────────────────────────────────────────────────
@@ -311,16 +318,22 @@ async function runAnalysis() {
   // Fire the API call immediately in parallel with the loading animation.
   // The animation for steps 0–2 runs while waiting for the response.
   //
-  // TODO: Once server.py /upload route is implemented, this fetch returns real data.
-  // Until then the .catch() returns null and getMockResult() is used as fallback.
+  // In demo mode we skip the network entirely so the animation can run
+  // against the hard-coded mock without touching Flask.
   const formData = new FormData();
   formData.append('file', selectedFile);
   formData.append('prompt', prompt);
   formData.append('mode', activeMode || ''); // routes server to correct pipeline script; empty for custom questions
 
-  const apiCall = fetch('/upload', { method: 'POST', body: formData })
-    .then(r => r.json())
-    .catch(() => null); // null triggers getMockResult() fallback below — REMOVE ON MERGE
+  const apiCall = USE_MOCK_RESULTS
+    ? Promise.resolve(null)
+    : fetch('/upload', { method: 'POST', body: formData })
+        .then(async r => {
+          const data = await r.json().catch(() => null);
+          if (!r.ok) return { __error: data?.error || `Server error (${r.status})` };
+          return data;
+        })
+        .catch(() => ({ __error: 'Network error — could not reach the server.' }));
 
   // Animate steps 0–2 with fixed delays
   const t0 = Date.now();
@@ -370,10 +383,22 @@ async function runAnalysis() {
 
   await delay(300); // brief pause before transitioning to results
 
-  // TODO (REMOVE ON MERGE): Delete the `|| getMockResult()` fallback once
-  // the real /upload route is live. apiResult will be the parsed JSON response.
-  // Expected shape: { narrative: string, metrics: { ... } }
-  const result = apiResult || getMockResult();
+  // Pick what to render:
+  //   - demo mode          → hard-coded mock
+  //   - real call w/ error → render the error message as the narrative
+  //   - real call ok       → render the server response
+  let result;
+  if (USE_MOCK_RESULTS) {
+    result = getMockResult();
+  } else if (apiResult?.__error) {
+    result = {
+      narrative: `Error: ${apiResult.__error}`,
+      metrics: {},
+      claims: [],
+    };
+  } else {
+    result = apiResult;
+  }
   showResults(result, t4);
 }
 
@@ -902,17 +927,21 @@ async function submitFollowup(question, inputEl) {
   formData.append('file', selectedFile);
   formData.append('prompt', question);
 
-  // Fetch with typed outcome. demoFallback=true means network failure
-  // should fall back to mock (removed on merge — see getMockResult TODOs).
-  let result     = null;
-  let errorMsg   = null;
-  let networkFail = false;
-  try {
-    const res = await fetch('/upload', { method: 'POST', body: formData });
-    result = await res.json().catch(() => null);
-    if (!res.ok) errorMsg = result?.error || `Server error (${res.status})`;
-  } catch {
-    networkFail = true; // REMOVE ON MERGE: set errorMsg instead once mock path is gone
+  // Fetch with typed outcome. In demo mode we skip the network and
+  // reuse the mock narrative after a short fake think.
+  let result   = null;
+  let errorMsg = null;
+  if (USE_MOCK_RESULTS) {
+    await delay(1200);
+    result = getMockResult();
+  } else {
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: formData });
+      result = await res.json().catch(() => null);
+      if (!res.ok) errorMsg = result?.error || `Server error (${res.status})`;
+    } catch {
+      errorMsg = 'Network error — could not reach the server.';
+    }
   }
 
   // ── error state ─────────────────────────────────────────────
@@ -950,9 +979,7 @@ async function submitFollowup(question, inputEl) {
   messageThread.appendChild(block);
   block.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  // TODO (REMOVE ON MERGE): Delete getMockResult().narrative fallback once
-  // the real /upload route returns live data.
-  const narrative = result?.narrative || (networkFail ? getMockResult().narrative : '');
+  const narrative = result?.narrative || '';
 
   // If the follow-up response includes updated metrics, re-render the data panel
   if (result?.metrics) updateMetrics(result.metrics, timeStr);
@@ -988,14 +1015,10 @@ function escapeHtml(str) {
 
 
 // ── Mock Data ─────────────────────────────────────────────────
-// TODO (REMOVE ON MERGE): Delete this entire function once the real
-// POST /upload route is live and returning data.
-//
-// Purpose: provides realistic fallback data so the full UI can be
-// demoed and tested without a running backend. Used in two places:
-//   1. runAnalysis()    — `apiResult || getMockResult()`
-//   2. submitFollowup() — `result?.narrative || getMockResult().narrative`
-// Both fallbacks should be removed at the same time as this function.
+// Hard-coded demo response. Only returned when USE_MOCK_RESULTS
+// (set near the top of this file) is true. The default path is the
+// real POST /upload call; errors surface as a visible error message
+// rather than silently falling back to this mock.
 
 function getMockResult() {
   return {

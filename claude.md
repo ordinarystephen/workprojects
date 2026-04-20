@@ -334,12 +334,11 @@ Currently `pipeline/analyze.py` has a `placeholder_processor()` that reads any E
 
 ## Mock Data / Demo Mode
 
-`main.js` falls back to `getMockResult()` when the backend is unreachable. Allows full UI demo without a live backend.
+`main.js` has a `USE_MOCK_RESULTS` boolean flag near the top. Default is `false`: the app talks to POST `/upload` and any failure (network, server, validation) renders as a visible error message in the narrative column instead of silently faking success.
 
-**Remove on merge (3 locations marked `TODO REMOVE ON MERGE`):**
-1. `getMockResult()` function at bottom of `main.js`
-2. `|| getMockResult()` fallback in `runAnalysis()`
-3. `getMockResult().narrative` fallback in `submitFollowup()`
+Flip `USE_MOCK_RESULTS = true` to bypass the backend and render `getMockResult()` for presentations or UI demos without a live Flask server. In that mode, follow-ups also use the mock narrative after a brief fake-think delay.
+
+Keep in mind: when demo mode is on the canned tiles render the generic mock metrics, not firm-level data. Flip back to `false` before real testing.
 
 Also safe to delete: `typewrite()` function (unused).
 
@@ -413,7 +412,7 @@ When making a new change for the user, always:
 - [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace TODO placeholders)
 - [ ] Port `processor.py` into KRONOS — register modes in `SCRIPT_MAP`, ensure return shape matches `{ context, metrics }`
 - [ ] Build `deterministic_narrative_payload` in `processor.py` — mode-scoped, replaces `commentary_facts` as primary LLM input
-- [ ] Remove mock data fallback from `main.js` (3 locations marked `TODO REMOVE ON MERGE`)
+- [ ] (optional) Delete the mock data path entirely once the Domino deploy is stable and demos no longer need a backend-less fallback
 - [ ] Update `prompts.json` with real mode slugs and prompt language for actual use cases
 - [ ] Test with real `.xlsx` files end-to-end
 - [ ] Test follow-up turns with metrics update
