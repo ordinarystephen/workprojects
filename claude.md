@@ -52,14 +52,31 @@
     prompts.json          ← Canned prompt definitions (modular — edit to add/remove buttons)
   /pipeline
     __init__.py           ← Package marker (empty)
-    analyze.py            ← Dispatcher: maps mode slug → correct processor script
-                             SCRIPT_MAP: { "firm-level": firm_level.run, ...future modes }
+    analyze.py            ← Dispatcher: classify → compute cube → slice
+                             MODE_MAP: { "firm-level": { template, slicer }, ... }
                              Falls back to placeholder_processor() for unregistered modes
-    firm_level.py         ← First real processor. run(file_obj) → { context, metrics }
-                             Reads Excel, validates 8 required columns, computes:
-                               distinct parents, distinct industries,
-                               total commitment ($M), total outstanding ($M),
-                               criticized & classified ($M), C&C % of commitment
+    /templates            ← Template ABC + concrete templates per workbook shape
+      base.py             ← Template ABC + FieldSpec + Role + ValidationWarning
+      lending.py          ← LendingTemplate (37 columns tagged: hierarchy, period,
+                             ratings, dims, horizontal flags, stocks, numerators)
+    /scales               ← Domain rating scales
+      pd_scale.py         ← C00…CDF (15 buckets, C00-C07 = Investment Grade);
+                             code_for_pd, is_investment_grade, direction
+    /parsers              ← Field-value parsers
+      regulatory_rating.py← Split-rating parser ("SS - 18%, D - 42%, L - 40%")
+    /loaders              ← Workbook-level entry
+      classifier.py       ← Reads all sheets, matches each to a Template by SIGNATURE,
+                             validates, returns { classified: {name: df}, metadata }
+    /cube                 ← Compute-once layer
+      models.py           ← Pydantic schema (LendingCube, KriBlock, GroupingHistory,
+                             ContributorBlock, MomBlock, …) — extra="forbid"
+      lending.py          ← compute_lending_cube(df) — firm-level + by_industry +
+                             by_horizontal + by_ig_status + watchlist + top_contributors
+                             + month_over_month (when ≥ 2 periods)
+    /processors           ← Slicers (mode → cube subset → context+metrics)
+      lending/firm_level.py ← slice_firm_level(cube) → { context, metrics }
+                             Builds prose context + tile sections (Firm-Level Overview,
+                             Investment-Grade Split, Horizontal Portfolios, Watchlist)
     agent.py              ← LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code)
                              • State, Context, MlflowConfigAgentContext (pydantic)
                              • create_llm() — AzureChatOpenAI with DefaultAzureCredential
@@ -82,7 +99,7 @@
 
 | Existing file | Role in KRONOS |
 |---|---|
-| `processor.py` | `pipeline/analyze.py` dispatcher + individual processor scripts registered in `SCRIPT_MAP` |
+| `processor.py` | `pipeline/analyze.py` dispatcher + per-mode slicers under `pipeline/processors/<template>/` registered in `MODE_MAP` |
 | `agent_client.py` | Replaced by `pipeline/agent.py` (LangGraph StateGraph + ResponsesAgent wrapper) |
 | `workbook_agent.py` | Replaced by `create_llm()` inside `pipeline/agent.py` |
 | `kronos/llm/prompts/prompts.py` | Replaced by `pipeline/prompts.py` (`SYSTEM_PROMPT` + `MODE_SYSTEM_PROMPTS`) |
@@ -137,8 +154,14 @@ server.py
         (no-op when KRONOS_MLFLOW_ENABLED is unset)
         ↓
         analyze(file, mode)                          ← pipeline/analyze.py
-          └─ routes via SCRIPT_MAP to processor (or placeholder_processor if not registered)
-          └─ returns { context, metrics }
+          └─ MODE_MAP[mode] → { template, slicer }
+          └─ classify(file)                          ← pipeline/loaders/classifier.py
+                └─ matches each sheet to a Template by SIGNATURE
+          └─ compute_lending_cube(df)                ← pipeline/cube/lending.py
+                └─ firm-level + by_dim + watchlist + top contributors + MoM
+          └─ slicer(cube)                            ← pipeline/processors/<template>/<mode>.py
+                └─ returns { context, metrics }
+          └─ (custom prompts / unwired modes → placeholder_processor)
         ↓
         ask_agent(context, prompt, mode)             ← pipeline/agent.py
           └─ _get_graph() — cached CompiledStateGraph
@@ -169,17 +192,17 @@ main.js renders:
 
 ### `mode` Routing
 
-Every request carries a `mode` slug (e.g. `"portfolio-summary"`) sent from the frontend. `pipeline/analyze.py` maps this to the correct processor script via `SCRIPT_MAP`. Mode slugs must match the `"mode"` field in `static/prompts.json`.
+Every request carries a `mode` slug (e.g. `"portfolio-summary"`) sent from the frontend. `pipeline/analyze.py` maps it to `{ template, slicer }` via `MODE_MAP`, runs the classifier, computes the cube once, then calls the slicer. Mode slugs must match the `"mode"` field in `static/prompts.json`.
 
 Custom questions (no canned button selected) send `mode = ''` — `analyze()` falls back to `placeholder_processor()`.
 
 **Currently wired modes:**
-| Slug | Processor | Status |
-|---|---|---|
-| `firm-level` | `pipeline/firm_level.py :: run()` | **Live** — first real processor |
-| `portfolio-summary` / `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | Placeholder fallback only |
+| Slug | Template | Slicer | Status |
+|---|---|---|---|
+| `firm-level` | `lending` | `pipeline/processors/lending/firm_level.py :: slice_firm_level` | **Live** |
+| `portfolio-summary` / `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | — | Placeholder fallback only |
 
-The `firm-level` workbook must contain these columns or `firm_level.run()` raises `ValueError` (surfaced as a 500 with the message): `Ultimate Parent Code`, `Risk Assessment Industry`, `Committed Exposure`, `Outstanding Exposure`, `Special Mention Rated Exposure`, `Substandard Rated Exposure`, `Doubtful Rated Exposure`, `Loss Rated Exposure`.
+The classifier matches sheets by `LendingTemplate.SIGNATURE` (`Facility ID`, `Weighted Average PD Numerator`, `Committed Exposure`). A workbook with no matching sheet raises `ValueError` (surfaced as a 500 with the sheets-seen list). Adding a new lending mode means writing a slicer in `pipeline/processors/lending/` and registering it in `MODE_MAP`. Adding a new workbook shape (e.g. Traded Products) means writing a new Template in `pipeline/templates/` and appending it to `classifier.TEMPLATES`.
 
 ### Environment Variables
 
@@ -278,9 +301,11 @@ Every MLflow call is wrapped in try/except. A tracking failure never surfaces as
 
 ### Multi-turn Chat (Follow-up)
 - **FAB** (`+` button) — fixed bottom-right, appears after first response. Hidden during an in-flight follow-up to prevent overlapping threads
-- **Follow-up input** — slides into narrative column, submits via Send or `Cmd/Ctrl+Enter`
-- **Submitting state** — Send button disables, shows spinner + "Sending…", textarea becomes readonly with `aria-busy`
-- **Error path** — non-2xx or `{error}` body surfaces as an inline red `.followup-error` row above the textarea with a Retry button. Retry re-reads the textarea so the user can edit before resending
+- **Follow-up input** — slides into narrative column, submits via Send or `Cmd/Ctrl+Enter`. Closing the FAB with a typed draft prompts to confirm before discarding
+- **Empty submit** — shake + brief CTA-tinted background on the textarea (instead of silent no-op)
+- **Submitting state** — Send button disables, shows spinner + "Sending…", textarea becomes readonly with `aria-busy`. Module-level `followupInFlight` guard early-returns on double-submit (e.g. a second Cmd+Enter while readonly)
+- **AbortController + 60s timeout** — every follow-up fetch is armed with an AbortController. `runAnalysis()` and the New Analysis button call `abortFollowup()` so a parent reset cancels the in-flight request instead of leaking state into a hidden DOM. A 60s timer fires `controller.abort('timeout')` so a hung Domino proxy can't pin the UI in submitting state forever
+- **Error path** — non-2xx, `{error}` body, or timeout surfaces as an inline red `.followup-error` row above the textarea with a Retry button (auto-scrolled into view). Retry re-reads the textarea so the user can edit before resending. Parent-aborts return silently
 - **Thread structure** — divider → thinking dots → message block with label + timestamp
 - **Metrics update** — follow-up with new metrics re-renders the Data Snapshot panel
 
@@ -310,7 +335,7 @@ Buttons rendered from `static/prompts.json`. To add/remove/edit buttons, only to
 }
 ```
 
-`mode` slug must match: `SCRIPT_MAP` key in `pipeline/analyze.py` AND `MODE_SYSTEM_PROMPTS` key in `pipeline/prompts.py`.
+`mode` slug must match: `MODE_MAP` key in `pipeline/analyze.py` AND `MODE_SYSTEM_PROMPTS` key in `pipeline/prompts.py`.
 
 Current slugs: `portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`.
 
@@ -325,6 +350,8 @@ Three features for output validation and traceability:
 
 ### 2. Number Cross-Check (Verification Badge)
 `pipeline/validate.py` extracts all numeric tokens from the narrative and checks whether each appears in the `context` string. Returns counts of verified vs unverified figures. Unverified doesn't mean wrong — calculated metrics (weighted averages, deltas) won't appear verbatim in source data.
+
+Dates are stripped from both sides before tokenization (ISO `YYYY-MM-DD` and prose `Month DD, YYYY`). Without this, an as-of date in the context (`2026-02-28`) and the LLM's prose rewrite of it (`February 28, 2026`) tokenize differently and produce a false-positive unverified.
 
 ### 3. Data Used Panel (Source Data Expandable)
 The API returns `context_sent` — the exact string the LLM analyzed. Rendered as a collapsible monospace panel below the narrative. Users can see exactly what data the AI had access to.
@@ -417,36 +444,40 @@ When making a new change for the user, always:
 - [x] `styles.css` — Complete design system with dark mode + responsive + transparency layer styles
 - [x] `main.js` — All interactions: drag-drop, canned prompts, mode routing, pipeline animation, metric rendering, multi-turn chat, copy button, Analysis/Claims tabs, verification badge, data-used panel, mock fallback
 - [x] `prompts.json` — Modular canned prompts with mode slugs
-- [x] `pipeline/analyze.py` — Dispatcher with `SCRIPT_MAP` + working `placeholder_processor()` for dev/demo
+- [x] `pipeline/analyze.py` — Dispatcher with `MODE_MAP` (template + slicer per mode) + working `placeholder_processor()` for dev/demo
 - [x] `pipeline/agent.py` — **LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code pattern)** with `with_structured_output(NarrativeResponse)` inside the narrate node + plain text fallback
 - [x] `pipeline/tracking.py` — **MLflow tracking layer gated by `KRONOS_MLFLOW_ENABLED`** (off by default). Logs tags, params, metrics, artifacts per request. Wraps `mlflow.start_run()` + `autolog()`
 - [x] `pipeline/prompts.py` — Global `SYSTEM_PROMPT` + per-mode `MODE_SYSTEM_PROMPTS` with TODO placeholders
-- [x] `pipeline/validate.py` — `cross_check_numbers()` numeric token cross-check
+- [x] `pipeline/validate.py` — `cross_check_numbers()` numeric token cross-check, with ISO + prose date stripping to suppress date-rewrite false positives
 - [x] `requirements.txt` — flask, pandas, openpyxl, langchain, langchain-openai, **langgraph, langgraph-checkpoint**, azure-identity, **mlflow[databricks]**
 - [x] `EXPLAINME.md` — Plain-English walkthrough of every file + integration steps
 - [x] `VSCODE_CHEATSHEET.md` — Python import tracing + VS Code navigation shortcuts
 - [x] `aboutme.md` — Full integration guide with real architecture, checklist, work AI prompt
 - [x] Git repo initialized, pushed to GitHub `kronos` branch
 - [x] Narrative text dumps immediately (no typewriter delay)
-- [x] `mode` field wired end-to-end: `prompts.json` → button → `activeMode` → `formData` → server → `SCRIPT_MAP`
+- [x] `mode` field wired end-to-end: `prompts.json` → button → `activeMode` → `formData` → server → `MODE_MAP`
 - [x] Bank-standard production pattern: LangGraph + ResponsesAgent + MLflow autolog (dormant)
 - [x] FAB follow-up: loading state on Send, inline error row with Retry, FAB hidden during in-flight request
 - [x] Real server-side stage timings returned in `/upload` response (`timings_ms`) and overwritten onto pipeline step labels; also logged to MLflow as `analyze_ms` / `llm_ms` / `verify_ms`
 - [x] `PULL_ME.md` sync-checklist workflow established for Domino pulls
-- [x] **`pipeline/firm_level.py` wired up as first real `SCRIPT_MAP` entry** — reads uploaded workbook, computes six firm-level figures, narrates via Azure OpenAI, renders tiles. "Firm-Level View" button added at position 1 of `prompts.json`
+- [x] **Lending pipeline rebuilt as templates → classifier → cube → slicer.** New tree: `pipeline/templates/` (Template ABC + LendingTemplate with 37 columns tagged), `pipeline/scales/pd_scale.py` (C00…CDF + IG/NIG), `pipeline/parsers/regulatory_rating.py` (split-rating parser), `pipeline/loaders/classifier.py` (auto-detect by SIGNATURE), `pipeline/cube/` (pydantic schema + `compute_lending_cube` producing firm-level + by-industry/segment/branch/horizontal/IG-status + watchlist + top-contributors + MoM), `pipeline/processors/lending/firm_level.py` (first slicer). `pipeline/firm_level.py` deleted; `analyze.py` switched from `SCRIPT_MAP` to `MODE_MAP`. Multi-period correctness: cube selects latest period for stock metrics, eliminating the prior Jan+Feb double-counting bug
 - [x] `USE_MOCK_RESULTS` demo toggle in `main.js` — default `false` so real API errors are now visible. Flip to `true` to bypass Flask and render `getMockResult()` for presentations
 - [x] **JSON upload transport + workspace proxy workaround.** UI posts `application/json` with a base64 file payload so uploads survive the Domino workspace proxy (which drops multipart). `server.py` branches on `Content-Type` and wraps the decoded bytes in a `_Base64File` shim — processors downstream see no difference. Multipart path preserved for curl / published Apps.
 - [x] `main.js` resolves the fetch URL via `new URL('upload', document.baseURI).href` so the workspace URL prefix (`/aice-studio/workspace/<id>/proxy/5000/`) is preserved instead of being stripped by an absolute path.
 - [x] `[KRONOS]`-prefixed `console.log` / `console.error` instrumentation around both `/upload` fetch sites — request shape, response status, parse errors, non-OK bodies, and raw `err.message` on network/CORS failures. Makes proxy-level failures diagnosable from DevTools alone.
 - [x] **Verified end-to-end on Domino workspace (2026-04-20):** upload → firm-level processor → Azure OpenAI narration → tiles rendered successfully inside the AICE Studio workspace (port 5000, host `0.0.0.0`)
+- [x] **FAB + follow-up state-machine hardening.** Module-level `followupController` (AbortController) + `followupInFlight` guard. `runAnalysis()` and the New Analysis button call `abortFollowup()` so a parent reset cancels the in-flight fetch. 60s fetch timeout fires `controller.abort('timeout')` so a hung Domino proxy can't pin the UI. Closing the FAB with a typed draft prompts to confirm. Empty submit triggers a shake+tint via reused `.shake` keyframe instead of silent no-op. Error row scrolls into view. Catch distinguishes timeout (user-facing message) vs parent abort (silent return)
+- [x] **Validator suppresses date-rewrite false positives.** `pipeline/validate.py` strips ISO (`YYYY-MM-DD`) and prose (`Month DD, YYYY`) dates from both narrative and context before tokenizing, so a context as-of date and the LLM's prose rewrite of it no longer contribute mismatched bare numbers
 
 ### Still To Do
 - [ ] Install `aice-mlflow-plugins==0.1.3` in the bank Python environment (internal package)
 - [ ] Confirm Domino can reach Databricks MLflow from the KRONOS compute environment
 - [ ] Flip `KRONOS_MLFLOW_ENABLED=true` when Databricks / AICE access is provisioned
 - [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace TODO placeholders)
-- [ ] Port remaining processors (`portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) and register in `SCRIPT_MAP` — `firm-level` is the working reference pattern
-- [ ] Build `deterministic_narrative_payload` in each processor — mode-scoped, replaces `commentary_facts` as primary LLM input
+- [ ] Port remaining slicers (`portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) under `pipeline/processors/lending/` and register in `MODE_MAP` — `firm_level.py` is the working reference pattern. Cube already computes the data each will need (by_industry, by_horizontal, top_contributors, month_over_month)
+- [ ] Update `pipeline/prompts.py` firm-level system prompt for the richer cube context (IG/NIG split, horizontal portfolios, watchlist, multi-period coverage, validation note)
+- [ ] Build `deterministic_narrative_payload` in each slicer — mode-scoped, replaces `commentary_facts` as primary LLM input
+- [ ] Add `TradedProductsTemplate` (when field list is provided) and append to `classifier.TEMPLATES`
 - [ ] (optional) Delete the mock data path entirely once the Domino deploy is stable and demos no longer need a backend-less fallback
 - [ ] Update `prompts.json` with real mode slugs and prompt language for actual use cases
 - [ ] Test with real `.xlsx` files end-to-end
