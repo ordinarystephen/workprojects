@@ -98,11 +98,14 @@
   "metrics":      { "Section Name": [{ "label": "...", "value": "...", "delta": "...", "sentiment": "positive|negative|warning|neutral" }] },
   "claims":       [{ "sentence": "...", "source_field": "...", "cited_value": "..." }],
   "context_sent": "string — exact data payload the LLM received",
-  "verification": { "total": 14, "verified_count": 11, "unverified_count": 3, "unverified": ["..."], "all_clear": false }
+  "verification": { "total": 14, "verified_count": 11, "unverified_count": 3, "unverified": ["..."], "all_clear": false },
+  "timings_ms":   { "analyze": 342, "llm": 5820, "verify": 12 }
 }
 ```
 
 All fields except `narrative` are optional — the frontend uses optional chaining on each.
+
+`timings_ms` reports real server-side stage durations. The frontend uses these to overwrite the pipeline step time labels after the API returns (see "Pipeline Step Timings" below).
 
 ### Data Flow
 
@@ -199,6 +202,9 @@ pip install aice-mlflow-plugins==0.1.3          # internal bank package
 | Metric | `claims_count` | Number of structured claims |
 | Metric | `verified_count` | Numbers in narrative found in source |
 | Metric | `unverified_count` | Numbers not in source (may be calculated) |
+| Metric | `analyze_ms` | `analyze()` stage duration |
+| Metric | `llm_ms` | `ask_agent()` stage duration |
+| Metric | `verify_ms` | `cross_check_numbers()` stage duration |
 | Metric | `latency_ms` | End-to-end request latency |
 | Artifact | `context_sent.txt` | Exact string the LLM saw (audit) |
 | Auto trace | LangChain chain | Prompt, response, tokens (via `autolog()`) |
@@ -245,12 +251,23 @@ Every MLflow call is wrapped in try/except. A tracking failure never surfaces as
 - Fully dynamic — rendered from whatever `metrics` object the API returns
 
 ### Multi-turn Chat (Follow-up)
-- **FAB** (`+` button) — fixed bottom-right, appears after first response
+- **FAB** (`+` button) — fixed bottom-right, appears after first response. Hidden during an in-flight follow-up to prevent overlapping threads
 - **Follow-up input** — slides into narrative column, submits via Send or `Cmd/Ctrl+Enter`
+- **Submitting state** — Send button disables, shows spinner + "Sending…", textarea becomes readonly with `aria-busy`
+- **Error path** — non-2xx or `{error}` body surfaces as an inline red `.followup-error` row above the textarea with a Retry button. Retry re-reads the textarea so the user can edit before resending
 - **Thread structure** — divider → thinking dots → message block with label + timestamp
 - **Metrics update** — follow-up with new metrics re-renders the Data Snapshot panel
 
 Note: follow-ups currently hit stateless `/upload`. When true multi-turn state is needed, LangGraph's checkpointing capability is already installed — just add a checkpointer to `load_graph()` and a `thread_id` per session.
+
+### Pipeline Step Timings
+The landing-page pipeline animation previously used hardcoded fake delays (`STEP_DELAYS = [800, 1400, 600, 0, 500]`). Now:
+- `STEP_DELAYS` shrunk to `[150, 250, 100, 0, 150]` — short visual placeholders so the animation doesn't block on theater
+- Server returns `timings_ms: { analyze, llm, verify }` on every `/upload` response
+- After `apiResult` resolves, `runAnalysis()` overwrites `time-0`…`time-4` labels with values derived from `timings_ms` (analyze split across steps 0+1, llm → step 3, verify → step 4)
+- If `timings_ms` is absent (old server, mock fallback), wall-clock labels remain — nothing breaks
+
+**Known limitation:** the *animation pacing* during the wait is still artificial — only the *displayed numbers* are honest. For true live-advancing progress, a streaming NDJSON endpoint would be needed (deferred due to Domino proxy-buffering risk).
 
 ---
 
@@ -344,6 +361,22 @@ Also safe to delete: `typewrite()` function (unused).
 
 - **Repo:** `https://github.com/ordinarystephen/workprojects.git`
 - **Branch:** `kronos` — all project files are on this branch
+- **Local setup:** local branch is `main`, tracking `origin/kronos`. `git push origin main:kronos` publishes changes
+
+---
+
+## Sync Workflow (this repo → Domino)
+
+The user does primary development in a Domino workspace. This repo is the source of truth. Workflow:
+
+1. Changes are made + committed + pushed here (to `origin/kronos`)
+2. `PULL_ME.md` at repo root tracks what needs copying into Domino
+3. Each change round appends a new `## Round N` section to `PULL_ME.md` with a checklist of touched files and a short "behavior change" note
+4. When the user has synced everything, they delete `PULL_ME.md` and commit the deletion
+
+When making a new change for the user, always:
+- Commit + push to `kronos`
+- Append a Round section to `PULL_ME.md` (create the file if missing) with an unchecked list of files and a one-paragraph description
 
 ---
 
@@ -369,6 +402,9 @@ Also safe to delete: `typewrite()` function (unused).
 - [x] Narrative text dumps immediately (no typewriter delay)
 - [x] `mode` field wired end-to-end: `prompts.json` → button → `activeMode` → `formData` → server → `SCRIPT_MAP`
 - [x] Bank-standard production pattern: LangGraph + ResponsesAgent + MLflow autolog (dormant)
+- [x] FAB follow-up: loading state on Send, inline error row with Retry, FAB hidden during in-flight request
+- [x] Real server-side stage timings returned in `/upload` response (`timings_ms`) and overwritten onto pipeline step labels; also logged to MLflow as `analyze_ms` / `llm_ms` / `verify_ms`
+- [x] `PULL_ME.md` sync-checklist workflow established for Domino pulls
 
 ### Still To Do
 - [ ] Install `aice-mlflow-plugins==0.1.3` in the bank Python environment (internal package)
