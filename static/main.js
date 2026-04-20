@@ -325,15 +325,38 @@ async function runAnalysis() {
   formData.append('prompt', prompt);
   formData.append('mode', activeMode || ''); // routes server to correct pipeline script; empty for custom questions
 
+  console.log('[KRONOS] Submitting upload', {
+    url: '/upload',
+    mode: activeMode || '(none)',
+    fileName: attachedFile?.name,
+    fileSize: attachedFile?.size,
+    promptLength: prompt.length,
+  });
+
   const apiCall = USE_MOCK_RESULTS
     ? Promise.resolve(null)
     : fetch('/upload', { method: 'POST', body: formData })
         .then(async r => {
-          const data = await r.json().catch(() => null);
-          if (!r.ok) return { __error: data?.error || `Server error (${r.status})` };
+          console.log('[KRONOS] /upload response received', {
+            status: r.status,
+            ok: r.ok,
+            type: r.type,
+            url: r.url,
+          });
+          const data = await r.json().catch(err => {
+            console.error('[KRONOS] Failed to parse /upload JSON', err);
+            return null;
+          });
+          if (!r.ok) {
+            console.error('[KRONOS] /upload returned non-OK', { status: r.status, body: data });
+            return { __error: data?.error || `Server error (${r.status})` };
+          }
           return data;
         })
-        .catch(() => ({ __error: 'Network error — could not reach the server.' }));
+        .catch(err => {
+          console.error('[KRONOS] /upload fetch failed (network/CORS/proxy)', err);
+          return { __error: `Network error — could not reach the server. (${err?.message || err})` };
+        });
 
   // Animate steps 0–2 with fixed delays
   const t0 = Date.now();
@@ -935,12 +958,31 @@ async function submitFollowup(question, inputEl) {
     await delay(1200);
     result = getMockResult();
   } else {
+    console.log('[KRONOS] Submitting follow-up', {
+      url: '/upload',
+      mode: activeMode || '(none)',
+      fileName: attachedFile?.name,
+      promptLength: userMessage.length,
+    });
     try {
       const res = await fetch('/upload', { method: 'POST', body: formData });
-      result = await res.json().catch(() => null);
-      if (!res.ok) errorMsg = result?.error || `Server error (${res.status})`;
-    } catch {
-      errorMsg = 'Network error — could not reach the server.';
+      console.log('[KRONOS] follow-up /upload response received', {
+        status: res.status,
+        ok: res.ok,
+        type: res.type,
+        url: res.url,
+      });
+      result = await res.json().catch(err => {
+        console.error('[KRONOS] Failed to parse follow-up JSON', err);
+        return null;
+      });
+      if (!res.ok) {
+        console.error('[KRONOS] follow-up /upload returned non-OK', { status: res.status, body: result });
+        errorMsg = result?.error || `Server error (${res.status})`;
+      }
+    } catch (err) {
+      console.error('[KRONOS] follow-up /upload fetch failed (network/CORS/proxy)', err);
+      errorMsg = `Network error — could not reach the server. (${err?.message || err})`;
     }
   }
 
