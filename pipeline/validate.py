@@ -39,6 +39,20 @@ _NUMBER_PATTERN = re.compile(
     r'[\+\-]?\$?\d+\.?\d*[%xBMKbmk]?'
 )
 
+# Dates are metadata, not figures. We strip them from BOTH the narrative
+# and the context before tokenizing — otherwise an ISO date in the context
+# ("2026-02-28") and the LLM's rewrite of it in the narrative
+# ("February 28, 2026" / "Feb 28, 2026") tokenize differently and produce
+# false-positive unverified counts. We strip both shapes to avoid leaving
+# half a date on either side.
+_ISO_DATE_PATTERN  = re.compile(r'\b\d{4}-\d{2}-\d{2}\b')
+_PROSE_DATE_PATTERN = re.compile(
+    r'\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+    r'Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+    r'\s+\d{1,2}(?:,\s*\d{4})?',
+    re.IGNORECASE,
+)
+
 _MIN_TOKEN_LENGTH = 2   # ignore tokens shorter than this
 _MIN_DIGIT_COUNT  = 1   # ignore tokens with fewer than N digit characters
 
@@ -48,6 +62,8 @@ def _extract_numbers(text: str) -> set:
     Extract all numeric tokens from a text string.
     Returns a set of strings (e.g. {'4.1%', '$4.82B', '698'}).
     """
+    text = _ISO_DATE_PATTERN.sub(' ', text)
+    text = _PROSE_DATE_PATTERN.sub(' ', text)
     tokens = _NUMBER_PATTERN.findall(text)
     result = set()
     for token in tokens:

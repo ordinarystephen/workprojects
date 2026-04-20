@@ -156,3 +156,17 @@ State-machine audit of the existing FAB + follow-up flow turned up four bugs (P0
 **Behavior change:** none on the happy path. Failure paths are now visible and recoverable; double-submits are impossible; mid-submit cancels are clean.
 
 **Compatibility:** purely additive. No new DOM, no new IDs, no API changes.
+
+---
+
+## Round 8 — Validator: strip dates before numeric tokenization
+
+Commit: _see `git log` on branch `kronos`_
+
+The verification badge was showing 1-of-N "unverified" figures whenever the LLM rewrote an ISO date from the context as natural-language prose. Root cause: the regex `[\+\-]?\$?\d+\.?\d*[%xBMKbmk]?` treats the dash in `2026-02-28` as a leading sign, so the context tokenizes to `'2026'`, `'-02'`, `'-28'`, while the LLM's prose `"February 28, 2026"` tokenizes to `'2026'`, `'28'` — bare `'28'` doesn't match `'-28'`, false positive.
+
+- [ ] `pipeline/validate.py` — added `_ISO_DATE_PATTERN` (`\b\d{4}-\d{2}-\d{2}\b`) and `_PROSE_DATE_PATTERN` (Jan/January/Feb/… + day + optional `, YYYY`). Both are stripped from the input string at the top of `_extract_numbers()` before the numeric regex runs. Dates contribute zero tokens to either side now, so any date format on either side matches cleanly.
+
+**Behavior change:** the verification badge no longer flags date components as unverified. The `unverified` list returned in the `verification` payload should drop by 1–2 tokens whenever the narrative includes a rewritten date. No change for narratives that don't reference dates.
+
+**Compatibility:** narrower, not wider — fewer tokens get extracted, so fewer false positives. No risk of new false negatives because we only stripped *date* substrings, not anything that could be a real figure.
