@@ -154,7 +154,7 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
     # bank's scale but not yet reflected in pd_scale.py). Warn but
     # don't raise — the rest of the cube is still usable.
     covered = ig_mask | nig_mask | defaulted_mask | non_rated_mask
-    unclassified_warnings: list[dict] = []
+    cube_warnings: list[dict] = []
     if (~covered).any():
         unclassified = df.loc[~covered, "PD Rating"]
         sample_vals = (
@@ -166,11 +166,24 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
             unclassified_count,
             sample_vals,
         )
-        unclassified_warnings.append({
+        cube_warnings.append({
             "code": "pd_rating_unclassified",
             "count": unclassified_count,
             "sample_values": sample_vals,
         })
+
+    # Dim-bucket reconciliation invariants. After `_normalize_dim` these
+    # should always pass — failure means a new code path is dropping
+    # rows between firm aggregation and dim bucketing.
+    firm_committed = firm_history.current.totals.committed
+    for section_name, sections in (
+        ("by_industry", by_industry),
+        ("by_segment",  by_segment),
+        ("by_branch",   by_branch),
+    ):
+        warn = _check_dim_reconciliation(section_name, sections, firm_committed)
+        if warn is not None:
+            cube_warnings.append(warn)
 
     # ── Watchlist firm-level aggregate ────────────────────────
     watchlist = _watchlist_aggregate(latest_df, latest_period)
@@ -213,7 +226,7 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
         as_of=_to_date(latest_period),
         periods=[_to_date(p) for p in periods],
         row_count=len(df),
-        warnings=unclassified_warnings,
+        warnings=cube_warnings,
     )
 
     return LendingCube(
@@ -300,11 +313,15 @@ def _exposure_totals(group: pd.DataFrame) -> ExposureTotals:
 
 
 def _counts(group: pd.DataFrame) -> Counts:
+    # `industries` counts normalized values so it matches len(by_industry):
+    # NaN / blank rows collapse to a single "Unclassified" bucket and
+    # contribute 1 to the count when present (rather than being dropped
+    # by nunique()'s default NaN exclusion).
     return Counts(
         parents    = int(group["Ultimate Parent Code"].nunique()),
         partners   = int(group["Partner Code"].nunique()),
         facilities = int(group["Facility ID"].nunique()),
-        industries = int(group["Risk Assessment Industry"].nunique()),
+        industries = int(group["Risk Assessment Industry"].apply(_normalize_dim).nunique()),
     )
 
 
@@ -368,20 +385,79 @@ def _grouping_history(
     return GroupingHistory(current=history[-1], history=history)
 
 
+def _normalize_dim(value) -> str:
+    """Normalize a dim value (industry / segment / branch).
+
+    NaN, None, blank, whitespace-only, and the literal "nan" string all
+    collapse to a single "Unclassified" bucket. This is what makes the
+    Σ by_X[*].committed == firm_level.committed reconciliation hold —
+    rows with a missing dim value used to be silently dropped from
+    every bucket while still contributing to the firm total.
+    """
+    if pd.isna(value):
+        return "Unclassified"
+    token = str(value).strip()
+    if not token or token.lower() == "nan":
+        return "Unclassified"
+    return token
+
+
 def _grouping_by_dim(
     df: pd.DataFrame,
     periods: list,
     column: str,
 ) -> dict[str, GroupingHistory]:
-    """Build a GroupingHistory per distinct value of `column`."""
+    """Build a GroupingHistory per distinct value of `column`.
+
+    Blank/NaN values are collapsed into a single "Unclassified" bucket
+    via `_normalize_dim` so that the per-bucket sums reconcile to the
+    firm total. "Unclassified" sorts alphabetically like any other
+    string and is rendered as a normal bucket — its presence is the
+    upstream-data-quality signal.
+    """
     result: dict[str, GroupingHistory] = {}
     if column not in df.columns:
         return result
-    values = df[column].dropna().unique()
+    normalized = df[column].apply(_normalize_dim)
+    values = normalized.unique()
     for v in sorted(values, key=str):
-        mask = df[column] == v
-        result[str(v)] = _grouping_history(df, periods, mask=mask)
+        mask = normalized == v
+        result[v] = _grouping_history(df, periods, mask=mask)
     return result
+
+
+def _check_dim_reconciliation(
+    section_name: str,
+    sections: dict[str, GroupingHistory],
+    firm_committed: float,
+) -> Optional[dict]:
+    """Verify Σ section[*].current.totals.committed ≈ firm committed.
+
+    Returns a warning dict when the gap exceeds
+    EXPOSURE_VALIDATION_TOLERANCE; None otherwise. A non-None result
+    means rows are being lost between firm-level aggregation and
+    bucketing — the `_normalize_dim` fix should prevent this for
+    NaN dim values, so a regression here means a new code path is
+    dropping rows.
+    """
+    if not sections:
+        return None
+    section_sum = sum(h.current.totals.committed for h in sections.values())
+    diff = section_sum - firm_committed
+    if abs(diff) <= EXPOSURE_VALIDATION_TOLERANCE:
+        return None
+    log.warning(
+        "%s does not reconcile to firm-level committed: "
+        "section_sum=%.2f, firm=%.2f, diff=%.2f",
+        section_name, section_sum, firm_committed, diff,
+    )
+    return {
+        "code": "dim_reconciliation_failed",
+        "section": section_name,
+        "firm_total": firm_committed,
+        "section_sum": section_sum,
+        "diff": diff,
+    }
 
 
 def _watchlist_aggregate(latest_df: pd.DataFrame, latest_period) -> WatchlistAggregate:
