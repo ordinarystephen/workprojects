@@ -25,6 +25,7 @@ from pipeline.cube.models import (
     ExposureMover,
     ExposureTotals,
     FacilityChange,
+    FacilityContributor,
     GroupingHistory,
     KriBlock,
     LendingCube,
@@ -48,6 +49,9 @@ TOP_N_CONTRIBUTORS = 10
 
 # Number of top exposure movers (by |Δ committed|) to retain in MoM.
 TOP_N_EXPOSURE_MOVERS = 10
+
+# Number of top facility-level WAPD contributors to retain.
+TOP_N_WAPD_FACILITIES = 10
 
 
 # ── Public entry point ────────────────────────────────────────
@@ -105,6 +109,25 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
     # ── Top contributors (parent-level, latest period) ────────
     top_contribs = _top_contributors(latest_df, latest_period)
 
+    # ── Facility-level WAPD drivers (firm + per-horizontal) ───
+    top_wapd_facilities = _top_wapd_facility_contributors(latest_df)
+    wapd_by_horizontal: dict[str, list[FacilityContributor]] = {}
+    for col, spec in LendingTemplate.FIELDS.items():
+        if spec.role != "horizontal_flag":
+            continue
+        portfolio = spec.portfolio_name or col
+        if col not in latest_df.columns:
+            continue
+        h_mask = (
+            latest_df[col].astype(str).str.strip()
+            == str(spec.trigger_value).strip()
+        )
+        if not h_mask.any():
+            continue
+        wapd_by_horizontal[portfolio] = _top_wapd_facility_contributors(
+            latest_df[h_mask]
+        )
+
     # ── Month-over-month (only if ≥ 2 periods) ────────────────
     mom: Optional[MomBlock] = None
     if len(periods) >= 2:
@@ -133,6 +156,8 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
         by_ig_status=by_ig_status,
         watchlist=watchlist,
         top_contributors=top_contribs,
+        top_wapd_facility_contributors=top_wapd_facilities,
+        wapd_contributors_by_horizontal=wapd_by_horizontal,
         month_over_month=mom,
     )
 
@@ -335,6 +360,65 @@ def _top_contributors(latest_df: pd.DataFrame, latest_period) -> ContributorBloc
         by_wapd_contribution = _to_contribs(grouped.sort_values("wapd_numerator", ascending=False)),
         by_cc_exposure       = _to_contribs(grouped.sort_values("cc_exposure", ascending=False)),
     )
+
+
+# ── Facility-level WAPD contributors ──────────────────────────
+#
+# Returns the top-N facilities by `Weighted Average PD Numerator`
+# within the supplied DataFrame slice. The numerator equals
+# PD × Committed Exposure for the loan, so the largest values are
+# the loans pulling WAPD up the most.
+#
+# share_of_numerator is computed against the SCOPE total, not the
+# firm total — when called with a horizontal-portfolio slice, shares
+# express each facility's contribution within that portfolio.
+
+def _top_wapd_facility_contributors(
+    scope_df: pd.DataFrame,
+    n: int = TOP_N_WAPD_FACILITIES,
+) -> list[FacilityContributor]:
+    if len(scope_df) == 0 or "Weighted Average PD Numerator" not in scope_df.columns:
+        return []
+
+    # Aggregate to facility level (a facility could appear on multiple rows
+    # in edge cases; .groupby(...).sum() collapses safely on a single-row
+    # facility too).
+    grouped = (
+        scope_df
+        .groupby("Facility ID", dropna=False)
+        .agg(
+            facility_name      = ("Facility Name", "first"),
+            parent_name        = ("Ultimate Parent Name", "first"),
+            committed          = ("Committed Exposure", "sum"),
+            wapd_numerator     = ("Weighted Average PD Numerator", "sum"),
+            pd_rating          = ("PD Rating", "first"),
+            regulatory_rating  = ("Regulatory Rating", "first"),
+        )
+        .reset_index()
+    )
+
+    scope_total_numerator = float(grouped["wapd_numerator"].sum())
+
+    grouped = grouped.sort_values("wapd_numerator", ascending=False).head(n)
+
+    out: list[FacilityContributor] = []
+    for _, row in grouped.iterrows():
+        committed     = float(row["committed"])
+        numerator     = float(row["wapd_numerator"])
+        implied_pd    = (numerator / committed) if committed else None
+        share         = (numerator / scope_total_numerator) if scope_total_numerator else None
+        out.append(FacilityContributor(
+            facility_id        = str(row["Facility ID"]),
+            facility_name      = (str(row["facility_name"]) if pd.notna(row["facility_name"]) else None),
+            parent_name        = (str(row["parent_name"]) if pd.notna(row["parent_name"]) else None),
+            committed          = committed,
+            wapd_numerator     = numerator,
+            implied_pd         = implied_pd,
+            pd_rating          = (str(row["pd_rating"]) if pd.notna(row["pd_rating"]) else None),
+            regulatory_rating  = (str(row["regulatory_rating"]) if pd.notna(row["regulatory_rating"]) else None),
+            share_of_numerator = share,
+        ))
+    return out
 
 
 # ── Month-over-month derivations ──────────────────────────────

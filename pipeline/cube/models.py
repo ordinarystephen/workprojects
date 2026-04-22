@@ -123,6 +123,28 @@ class ContributorBlock(BaseModel):
     by_cc_exposure:         list[Contributor] = Field(default_factory=list)
 
 
+# ── Facility-level WAPD contributors ──────────────────────────
+#
+# Per-loan view of which facilities are driving the weighted-average
+# PD. Numerator = PD × Committed Exposure for the facility.
+# share_of_numerator = facility_numerator / scope_total_numerator,
+# where "scope" is whatever the list was computed within
+# (firm-level, a horizontal portfolio, etc.).
+
+class FacilityContributor(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    facility_id:        str
+    facility_name:      Optional[str] = None
+    parent_name:        Optional[str] = None
+    committed:          float = 0.0
+    wapd_numerator:     float = 0.0     # PD × Committed for this facility
+    implied_pd:         Optional[float] = None  # numerator / committed (decimal)
+    pd_rating:          Optional[str] = None
+    regulatory_rating:  Optional[str] = None
+    share_of_numerator: Optional[float] = None  # this facility's share of scope total
+
+
 # ── Month-over-month ──────────────────────────────────────────
 
 class RatingChange(BaseModel):
@@ -219,6 +241,11 @@ class LendingCube(BaseModel):
     watchlist:      WatchlistAggregate
 
     top_contributors: ContributorBlock
+
+    # Facility-level WAPD drivers (latest period).
+    # firm-level list, plus per-horizontal-portfolio lists.
+    top_wapd_facility_contributors: list[FacilityContributor] = Field(default_factory=list)
+    wapd_contributors_by_horizontal: dict[str, list[FacilityContributor]] = Field(default_factory=dict)
 
     # Populated only when the file contains ≥ 2 periods.
     month_over_month: Optional[MomBlock] = None

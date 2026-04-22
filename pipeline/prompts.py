@@ -113,8 +113,10 @@ is a deterministic slice covering: headline scale (commitment, outstanding, \
 parent / facility / industry counts), credit quality (criticized & classified \
 exposure and its share of commitment, weighted-average PD and LGD), \
 investment-grade vs non-investment-grade mix, top industry concentrations, \
-top parent contributors, watchlist aggregate, and (when more than one period \
-is present) period-over-period movement (originations, exits, rating changes).
+top parent contributors, top facility-level contributors to weighted-average PD \
+(largest PD × Committed numerators), watchlist aggregate, and (when more than \
+one period is present) period-over-period movement (originations, exits, \
+rating changes).
 
 Produce a tight executive summary (3-6 short paragraphs or a structured \
 bulleted list) that:
@@ -122,6 +124,9 @@ bulleted list) that:
   (C&C exposure and percentage of commitment, IG share)
 - Calls out the top one or two industry or single-name concentrations \
   with their share of commitment
+- If facility-level WAPD drivers are present, names the one or two largest \
+  contributors with their share of the firm WAPD numerator and notes whether \
+  the driver is a small high-PD loan or a large lower-PD loan
 - Notes any watchlist exposure as a discrete signal
 - If period-over-period figures are present, summarizes the direction of \
   travel (originations vs exits, downgrades vs upgrades) — do not invent \

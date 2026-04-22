@@ -112,6 +112,30 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
                 f"- {label}: ${c.committed:,.2f} ({share:.2f}% of total commitment)"
             )
 
+    # ── Top facility-level WAPD drivers ───────────────────────
+    if cube.top_wapd_facility_contributors:
+        context_lines += [
+            "",
+            f"Top {len(cube.top_wapd_facility_contributors)} facility-level "
+            f"contributors to Weighted Average PD (numerator = PD × Committed):",
+        ]
+        for f in cube.top_wapd_facility_contributors:
+            label = f.facility_name or f.facility_id
+            parent = f" — parent {f.parent_name}" if f.parent_name else ""
+            share = (
+                f"{f.share_of_numerator * 100:.2f}% of firm WAPD numerator"
+                if f.share_of_numerator is not None else "n/a"
+            )
+            implied = (
+                f"implied PD {f.implied_pd * 100:.2f}%"
+                if f.implied_pd is not None else "implied PD n/a"
+            )
+            rating = f"PD rating {f.pd_rating}" if f.pd_rating else "PD rating n/a"
+            context_lines.append(
+                f"- {label}{parent}: ${f.committed:,.2f} committed, "
+                f"numerator {f.wapd_numerator:,.2f} ({share}), {implied}, {rating}"
+            )
+
     # ── Watchlist signal ──────────────────────────────────────
     if cube.watchlist.facility_count > 0 or cube.watchlist.committed > 0:
         context_lines += [
@@ -199,6 +223,17 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
              "value": _money(c.committed),
              "sentiment": "neutral"}
             for c in top_parents
+        ]
+
+    top_wapd_for_tiles = cube.top_wapd_facility_contributors[:5]
+    if top_wapd_for_tiles:
+        metrics[f"Top {len(top_wapd_for_tiles)} WAPD Drivers (Facility)"] = [
+            {"label": (f.facility_name or f.facility_id),
+             "value": (f"{f.share_of_numerator * 100:.1f}% · {_money(f.committed)}"
+                       if f.share_of_numerator is not None
+                       else _money(f.committed)),
+             "sentiment": "warning"}
+            for f in top_wapd_for_tiles
         ]
 
     if cube.watchlist.facility_count > 0:

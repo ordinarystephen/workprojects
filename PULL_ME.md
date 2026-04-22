@@ -191,3 +191,20 @@ Wires up the second canned mode (`portfolio-summary`) end-to-end against the exi
 **Field-rename compatibility:** the lending workbook header strings `Current Month Regulatory Rating` and `Credit Watchlist Flag` no longer match the template — uploads must use `Regulatory Rating` and `Credit Watch List Flag` after this change. The classifier will fail fast with a missing-required-column error if the workbook still uses the old names.
 
 **Repo-only docs in this commit (no Domino pull needed):** `LANGCHAIN_AZURE_FORMULA.md` (reusable Azure OpenAI + LangGraph recipe), `UI_tweaks.md` (cheatsheet for font/layout/card-order tweaks).
+
+---
+
+## Round 10 — Facility-level WAPD contributors
+
+Commit: _see `git log` on branch `kronos`_
+
+Adds a deterministic answer to "which loans are pulling the WAPD up the most?". Top facilities by `Weighted Average PD Numerator` (PD × Committed Exposure) are computed at the firm level and per horizontal portfolio, then surfaced in the Portfolio Summary narrative + a new tile section.
+
+- [ ] `pipeline/cube/models.py` — **NEW MODEL `FacilityContributor`** (facility_id, facility_name, parent_name, committed, wapd_numerator, implied_pd, pd_rating, regulatory_rating, share_of_numerator). Two new fields on `LendingCube`: `top_wapd_facility_contributors: list[FacilityContributor]` (firm-level top 10) and `wapd_contributors_by_horizontal: dict[str, list[FacilityContributor]]` (top 10 per horizontal portfolio).
+- [ ] `pipeline/cube/lending.py` — added `TOP_N_WAPD_FACILITIES = 10` and `_top_wapd_facility_contributors(scope_df, n)` helper. Groups the scope DataFrame by `Facility ID`, sorts by `Weighted Average PD Numerator` desc, computes per-facility `implied_pd` (numerator/committed) and `share_of_numerator` (vs scope total). Called once for the firm-level slice and once per horizontal portfolio. Both new fields are populated in the returned `LendingCube`.
+- [ ] `pipeline/processors/lending/portfolio_summary.py` — new context block listing top WAPD drivers (parent, $ committed, numerator, share %, implied PD, PD rating) and a new tile section "Top 5 WAPD Drivers (Facility)" showing share % + committed exposure with `warning` sentiment.
+- [ ] `pipeline/prompts.py` — `portfolio-summary` system prompt mentions the new section is in the data and asks the narrative to call out the top one or two drivers and distinguish small-high-PD vs large-lower-PD loans.
+
+**Behavior change:** Portfolio Summary now produces a deterministic top-WAPD-contributors list and a new tile section. The LLM narrative will reference the loans driving the WAPD up. The per-horizontal map (`wapd_contributors_by_horizontal`) is computed and stored in the cube but not yet rendered in any slicer — available for future per-portfolio narration.
+
+**Compatibility:** purely additive on the cube. Existing slicers (firm-level) continue to work unchanged because they don't read the new fields.
