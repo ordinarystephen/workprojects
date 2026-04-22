@@ -39,9 +39,10 @@
 ```
 /kronos
   app.sh                  ← Domino entry point (runs server.py on port 8888)
-  server.py               ← Flask app: static files + /upload route (orchestrator)
+  server.py               ← Flask app: static files + /upload + /modes +
+                             /cube/parameter-options + /errors/recent
                              Calls activate_mlflow() at import, wraps /upload in mlflow_run()
-  requirements.txt        ← flask, pandas, openpyxl, langchain, langchain-openai,
+  requirements.txt        ← flask, pandas, openpyxl, pyyaml, langchain, langchain-openai,
                              langgraph, langgraph-checkpoint, azure-identity, mlflow[databricks]
   EXPLAINME.md            ← Plain-English integration guide for non-developers
   VSCODE_CHEATSHEET.md    ← VS Code navigation shortcuts for Python tracing
@@ -52,19 +53,40 @@
     index.html            ← Main UI
     styles.css            ← Full design system + dark mode
     main.js               ← All frontend interactions + fetch() calls to Flask
-    prompts.json          ← Canned prompt definitions (modular — edit to add/remove buttons)
+                             (loads buttons from /modes; no static prompts.json)
+  /config                 ← Source of truth for the mode registry
+    modes.yaml            ← All mode definitions (slug, display, parameters,
+                             cube_slice, prompt_template, status). Validated at
+                             app import by pipeline/registry.py.
+    /prompts              ← Per-mode prompt templates (markdown, {{param}} subst)
+      default.md          ← Fallback for placeholder / unparameterized modes
+      firm_level.md
+      portfolio_summary.md
+      portfolio_level.md
+      portfolio_comparison.md
+  /docs
+    calculation-audit.md  ← Read-only audit of cube + slicers (gaps, recs)
   /pipeline
     __init__.py           ← Package marker (empty)
-    analyze.py            ← Dispatcher: classify → compute cube → slice
-                             MODE_MAP: { "firm-level": { template, slicer }, ... }
-                             Falls back to placeholder_processor() for unregistered modes
+    registry.py           ← YAML-driven mode registry. ModeDefinition (pydantic),
+                             @register_slicer decorator, load_registry(),
+                             get_mode/list_active_modes/list_modes_for_ui,
+                             resolve_parameter_options, validate_parameters,
+                             load_prompt (with {{param}} substitution).
+    analyze.py            ← Dispatcher: registry lookup → classify → compute cube → slice
+                             Calls get_slicer(mode.cube_slice) and invokes its fn.
+                             Raises mode_not_implemented for placeholder modes.
     /templates            ← Template ABC + concrete templates per workbook shape
       base.py             ← Template ABC + FieldSpec + Role + ValidationWarning
       lending.py          ← LendingTemplate (37 columns tagged: hierarchy, period,
                              ratings, dims, horizontal flags, stocks, numerators)
     /scales               ← Domain rating scales
-      pd_scale.py         ← C00…CDF (15 buckets, C00-C07 = Investment Grade);
-                             code_for_pd, is_investment_grade, direction
+      pd_scale.py         ← C00…CDF (15 buckets). Five-category classification:
+                             IG = C00–C07, NIG = C08–C13, Defaulted = CDF,
+                             Non-Rated = {TBR, NTR, UNRATED, NA, N/A, #REF, blank}.
+                             Distressed = C13 (a sub-stat of NIG, not a peer bucket).
+                             Helpers: code_for_pd, is_investment_grade, is_non_rated,
+                             distressed_code, defaulted_code, NON_RATED_TOKENS, direction.
     /parsers              ← Field-value parsers
       regulatory_rating.py← Split-rating parser ("SS - 18%, D - 42%, L - 40%")
     /loaders              ← Workbook-level entry
@@ -74,53 +96,77 @@
       models.py           ← Pydantic schema (LendingCube, KriBlock, GroupingHistory,
                              ContributorBlock, FacilityContributor, MomBlock, …)
                              — all extra="forbid"
+                             LendingCube.available_portfolios → sorted by_industry keys
       lending.py          ← compute_lending_cube(df) — firm-level + by_industry +
-                             by_horizontal + by_ig_status + watchlist + top_contributors
+                             by_horizontal + by_ig_status (IG, NIG) + by_defaulted +
+                             by_non_rated + nig_distressed_substats (C13 subset) +
+                             watchlist + top_contributors
                              + top_wapd_facility_contributors (firm + per-horizontal)
-                             + month_over_month (when ≥ 2 periods)
-    /processors           ← Slicers (mode → cube subset → context+metrics)
-      lending/firm_level.py        ← slice_firm_level(cube) → { context, metrics }
-                                     Sections: Firm-Level Overview, Investment-Grade Split,
-                                     Horizontal Portfolios, Watchlist
-      lending/portfolio_summary.py ← slice_portfolio_summary(cube) → { context, metrics }
-                                     Executive view. Sections: Headline, Investment-Grade
-                                     Mix, Top Industries, Top Parents, Top WAPD Drivers
-                                     (Facility), Watchlist, Period Movement
+                             + month_over_month (when ≥ 2 periods). Emits
+                             pd_rating_unclassified warning if any rows fall outside
+                             the five-category mask (IG | NIG | Defaulted | Non-Rated).
+    /processors           ← Slicers (mode → cube subset → context+metrics+verifiable_values)
+      lending/firm_level.py        ← @register_slicer("firm_level")
+                                     Sections: Firm-Level Overview, Rating Category
+                                     Composition (IG / NIG / of-which Distressed /
+                                     Defaulted / Non-Rated), Horizontal Portfolios,
+                                     Watchlist
+      lending/portfolio_summary.py ← @register_slicer("portfolio_summary")
+                                     Executive view. Sections: Headline, Rating Category
+                                     Composition, Top Industries, Top Parents, Top WAPD
+                                     Drivers (Facility), Watchlist, Period Movement
     agent.py              ← LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code)
-                             • State, Context, MlflowConfigAgentContext (pydantic)
+                             • State (incl. prior_narrative for follow-ups), Context,
+                               MlflowConfigAgentContext (pydantic)
                              • create_llm() — AzureChatOpenAI with DefaultAzureCredential
+                             • _build_message_sequence(state) — emits first-turn shape
+                               or [System, Human(context), AI(prior), Human(question)]
+                               when prior_narrative is set
                              • narrate() / anarrate() — sync + async nodes with structured output
                              • load_graph() — builds StateGraph
-                             • ask_agent() — Flask-facing entry point
+                             • ask_agent(context, prompt, mode, system_prompt,
+                               prior_narrative="") — Flask-facing entry point
                              • LangGraphResponsesAgent — MLflow model wrapper
                              • mlflow.models.set_model(...) — model-from-code registration
     tracking.py           ← MLflow tracking layer — GATED by KRONOS_MLFLOW_ENABLED
                              • activate_mlflow() — called once at app import
                              • mlflow_run() — context manager around each /upload
                              • _NoOpRun / _ActiveRun — dual-mode run handle
-    prompts.py            ← All LLM prompts: global SYSTEM_PROMPT + per-mode MODE_SYSTEM_PROMPTS
-    validate.py           ← cross_check_numbers(): compares narrative figures vs source data
+    error_log.py          ← Two-tier error capture (always-on JSONL + opt-in MLflow).
+                             See "Error Logging Layer" section below.
+    validate.py           ← cross_check_numbers(): compares narrative figures vs source data;
+                             verify_claims(): per-claim resolve against verifiable_values
+                             (mismatch vs field_not_found distinction)
+    /tests                ← pytest suite
+      test_registry.py    ← YAML schema validation, slicer cross-check, parameter resolve
+      test_validate.py    ← Date stripping, claim verification edge cases
+      test_label_collisions.py ← Catches verifiable_values label collisions across slicers
 ```
 
-**Note:** `pipeline/llm.py` was removed — LLM construction is now inline in `pipeline/agent.py` (`create_llm()`), which is the bank-standard pattern per the AICE cookbook.
+**Note:** `pipeline/prompts.py` and `static/prompts.json` were removed in the registry refactor. All prompt text now lives under `config/prompts/*.md` and all mode metadata in `config/modes.yaml`. Frontend fetches the button list from `GET /modes` instead of bundling a static JSON. `pipeline/llm.py` was removed earlier — LLM construction is inline in `pipeline/agent.py` (`create_llm()`).
 
 ### Real Codebase Mapping (existing Domino app → KRONOS)
 
 | Existing file | Role in KRONOS |
 |---|---|
-| `processor.py` | `pipeline/analyze.py` dispatcher + per-mode slicers under `pipeline/processors/<template>/` registered in `MODE_MAP` |
+| `processor.py` | `pipeline/analyze.py` dispatcher + per-mode slicers under `pipeline/processors/<template>/` self-registered via `@register_slicer` |
 | `agent_client.py` | Replaced by `pipeline/agent.py` (LangGraph StateGraph + ResponsesAgent wrapper) |
 | `workbook_agent.py` | Replaced by `create_llm()` inside `pipeline/agent.py` |
-| `kronos/llm/prompts/prompts.py` | Replaced by `pipeline/prompts.py` (`SYSTEM_PROMPT` + `MODE_SYSTEM_PROMPTS`) |
+| `kronos/llm/prompts/prompts.py` | Replaced by `config/prompts/*.md` (per-mode templates) + `config/modes.yaml` (registry); loaded via `pipeline/registry.py::load_prompt()` |
 | `main.py` (Streamlit) | Replaced by `server.py` (Flask) + `static/main.js` (frontend) |
 | (new in KRONOS) | `pipeline/tracking.py` — MLflow audit logging with kill switch |
+| (new in KRONOS) | `pipeline/error_log.py` — always-on JSONL + opt-in MLflow error capture |
+| (new in KRONOS) | `pipeline/registry.py` — YAML-driven mode registry + slicer decorator |
 
-### API Route
+### API Routes
 
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/` | Serves `index.html` |
-| `POST` | `/upload` | Receives file + prompt + mode, runs pipeline, returns JSON |
+| `GET` | `/modes` | Returns the list of UI-visible modes from the registry (`config/modes.yaml`). Frontend renders the Quick Analysis buttons from this — no static `prompts.json`. |
+| `GET` | `/cube/parameter-options?mode=<slug>` | For parameterized modes (e.g. `portfolio-level`), returns the live option list pulled from the cube (e.g. industry names). Used to populate dropdowns at request time. |
+| `POST` | `/upload` | Receives file + prompt + mode + parameters + prior_narrative, runs pipeline, returns JSON. |
+| `GET` | `/errors/recent` | Tail of the JSONL error log. Gated by `KRONOS_ERRORS_ENDPOINT_ENABLED` (404 when disabled). |
 
 ### POST /upload Transports
 
@@ -128,10 +174,12 @@ The route accepts **two request shapes**; pick whichever works through the proxy
 
 | `Content-Type` | Body | When to use |
 |---|---|---|
-| `application/json` | `{ file_name, file_b64, prompt, mode }` (file_b64 = base64 of the workbook bytes) | **UI default.** Required on Domino workspace URLs (`/workspace/<id>/proxy/<port>/`) — the workspace proxy silently drops multipart POSTs |
-| `multipart/form-data` | `file` + `prompt` + `mode` as form fields | curl, local dev, and Domino **published apps** (different proxy, handles multipart) |
+| `application/json` | `{ file_name, file_b64, prompt, mode, parameters, prior_narrative }` (file_b64 = base64 of the workbook bytes; parameters = object of `{name: value}`; prior_narrative = previous turn's narrative for follow-ups) | **UI default.** Required on Domino workspace URLs (`/workspace/<id>/proxy/<port>/`) — the workspace proxy silently drops multipart POSTs |
+| `multipart/form-data` | `file` + `prompt` + `mode` + `parameters` (JSON string) + `prior_narrative` as form fields | curl, local dev, and Domino **published apps** (different proxy, handles multipart) |
 
 `server.py` branches on `request.is_json`. The JSON path decodes `file_b64` and wraps the bytes in a tiny `_Base64File` shim that exposes `.read()`, `.filename`, and `.content_length` — from `analyze()` / processors downstream, the upload looks identical whichever transport was used.
+
+`parameters` is a JSON object of mode-specific arguments (e.g. `{"portfolio": "Energy"}` for `portfolio-level`). Validated by `pipeline/registry.py::validate_parameters()` against the mode's declared schema before the slicer runs. `prior_narrative` is the previous turn's narrative text — present only on follow-up requests, threaded through `agent.py::_build_message_sequence()` to seed the conversation.
 
 ### POST /upload Response Shape
 
@@ -153,30 +201,44 @@ All fields except `narrative` are optional — the frontend uses optional chaini
 ### Data Flow
 
 ```
-User uploads file + selects mode + enters prompt
+User uploads file + selects mode + enters prompt (+ optional parameters)
       ↓
-POST /upload  (application/json from UI: { file_name, file_b64, prompt, mode }
-               or multipart/form-data from curl/App: file, prompt, mode)
+POST /upload  (application/json from UI: { file_name, file_b64, prompt, mode,
+                                            parameters, prior_narrative }
+               or multipart/form-data from curl/App: same fields)
       ↓
 server.py
   └─ with mlflow_run(mode, file_name, file_size, user_prompt) as run:   ← pipeline/tracking.py
         (no-op when KRONOS_MLFLOW_ENABLED is unset)
         ↓
-        analyze(file, mode)                          ← pipeline/analyze.py
-          └─ MODE_MAP[mode] → { template, slicer }
+        get_mode(slug)                               ← pipeline/registry.py
+          └─ Looks up ModeDefinition in registry loaded from config/modes.yaml
+          └─ Raises mode_not_implemented for placeholder modes
+        ↓
+        validate_parameters(mode, params, cube=None) ← pipeline/registry.py (pre-cube pass)
+        ↓
+        analyze(file, mode, parameters)              ← pipeline/analyze.py
           └─ classify(file)                          ← pipeline/loaders/classifier.py
                 └─ matches each sheet to a Template by SIGNATURE
           └─ compute_lending_cube(df)                ← pipeline/cube/lending.py
                 └─ firm-level + by_dim + watchlist + top contributors + MoM
-          └─ slicer(cube)                            ← pipeline/processors/<template>/<mode>.py
-                └─ returns { context, metrics }
-          └─ (custom prompts / unwired modes → placeholder_processor)
+          └─ validate_parameters(mode, params, cube) ← second, cube-aware pass
+                (e.g. portfolio name must be in cube.available_portfolios)
+          └─ get_slicer(mode.cube_slice)(cube, parameters)
+                                                     ← @register_slicer-decorated function
+                └─ returns { context, metrics, verifiable_values }
         ↓
-        ask_agent(context, prompt, mode)             ← pipeline/agent.py
+        load_prompt(mode, parameters)                ← pipeline/registry.py
+          └─ Reads config/prompts/<template>.md, substitutes {{param}} placeholders
+        ↓
+        ask_agent(context, prompt, mode, system_prompt, prior_narrative)
+                                                     ← pipeline/agent.py
           └─ _get_graph() — cached CompiledStateGraph
-          └─ graph.invoke({ messages, context_data, mode })
+          └─ graph.invoke(state with prior_narrative populated for follow-ups)
+               └─ _build_message_sequence(state)
+                    └─ first turn: [System, Human(context+question)]
+                    └─ follow-up:  [System, Human(context), AI(prior), Human(question)]
                └─ narrate() node
-                    └─ get_system_prompt(mode)       ← pipeline/prompts.py
                     └─ create_llm()                  ← AzureChatOpenAI + bearer token
                     └─ llm.with_structured_output(NarrativeResponse)
                                                      → narrative + claims list
@@ -185,11 +247,11 @@ server.py
           └─ (autolog captures chain trace if MLflow active)
         ↓
         cross_check_numbers(narrative, context)      ← pipeline/validate.py
-          └─ returns { total, verified_count, unverified_count, unverified[], all_clear }
+        verify_claims(claims, verifiable_values)     ← pipeline/validate.py
         ↓
         run.log(metrics)                             ← logs latency, counts, artifacts
       ↓
-server.py returns { narrative, metrics, claims, context_sent, verification }
+server.py returns { narrative, metrics, claims, context_sent, verification, timings_ms }
       ↓
 main.js renders:
   - Analysis tab (narrative text)
@@ -201,24 +263,29 @@ main.js renders:
 
 ### `mode` Routing
 
-Every request carries a `mode` slug (e.g. `"portfolio-summary"`) sent from the frontend. `pipeline/analyze.py` maps it to `{ template, slicer }` via `MODE_MAP`, runs the classifier, computes the cube once, then calls the slicer. Mode slugs must match the `"mode"` field in `static/prompts.json`.
+Every request carries a `mode` slug (e.g. `"portfolio-summary"`) sent from the frontend. `pipeline/registry.py::get_mode(slug)` looks up the `ModeDefinition` (loaded from `config/modes.yaml` at app import). The dispatcher in `pipeline/analyze.py` runs the classifier, computes the cube once, then calls the slicer registered under `mode.cube_slice` via `@register_slicer`. Mode slugs come from the registry — the frontend fetches them from `GET /modes`, so they're never hard-coded in two places.
 
 Custom questions (no canned button selected) send `mode = ''` — `analyze()` falls back to `placeholder_processor()`.
 
 **Currently wired modes:**
 | Slug | Template | Slicer | Status |
 |---|---|---|---|
-| `firm-level` | `lending` | `pipeline/processors/lending/firm_level.py :: slice_firm_level` | **Live** |
-| `portfolio-summary` | `lending` | `pipeline/processors/lending/portfolio_summary.py :: slice_portfolio_summary` | **Live** |
-| `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | — | Placeholder fallback only |
+| `firm-level` | `lending` | `@register_slicer("firm_level")` in `pipeline/processors/lending/firm_level.py` | **Live** |
+| `portfolio-summary` | `lending` | `@register_slicer("portfolio_summary")` in `pipeline/processors/lending/portfolio_summary.py` | **Live** |
+| `portfolio-level` / `portfolio-comparison` | `lending` | — | **Parameterized placeholder** — registered with `parameters:` in YAML; raises `mode_not_implemented` until slicer is wired |
+| `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | — | Plain placeholders — visible in UI, raises `mode_not_implemented` |
 
-The classifier matches sheets by `LendingTemplate.SIGNATURE` (`Facility ID`, `Weighted Average PD Numerator`, `Committed Exposure`). A workbook with no matching sheet raises `ValueError` (surfaced as a 500 with the sheets-seen list). Adding a new lending mode means writing a slicer in `pipeline/processors/lending/` and registering it in `MODE_MAP`. Adding a new workbook shape (e.g. Traded Products) means writing a new Template in `pipeline/templates/` and appending it to `classifier.TEMPLATES`.
+The classifier matches sheets by `LendingTemplate.SIGNATURE` (`Facility ID`, `Weighted Average PD Numerator`, `Committed Exposure`). A workbook with no matching sheet raises `ValueError` (surfaced as a 500 with the sheets-seen list). Adding a new lending mode means: (a) writing a slicer in `pipeline/processors/lending/` decorated with `@register_slicer("name")`, (b) adding a `ModeDefinition` block to `config/modes.yaml` referencing that slicer name in `cube_slice:`, (c) writing a prompt template at `config/prompts/<name>.md`. Adding a new workbook shape (e.g. Traded Products) means writing a new Template in `pipeline/templates/` and appending it to `classifier.TEMPLATES`.
 
 **Lending workbook field names** (header strings the classifier expects, not arbitrary): `Regulatory Rating` (was `Current Month Regulatory Rating`), `Credit Watch List Flag` (was `Credit Watchlist Flag`). Workbooks using the old names will fail classification with a missing-required-column error.
 
 **Cube — what's available to slicers** (from `compute_lending_cube`):
 - `firm_level: GroupingHistory` — current + history KriBlocks
-- `by_industry / by_segment / by_branch / by_horizontal / by_ig_status: dict[str, GroupingHistory]`
+- `by_industry / by_segment / by_branch / by_horizontal: dict[str, GroupingHistory]`
+- `by_ig_status: dict[str, GroupingHistory]` — keys are `"IG"` (C00–C07) and `"NIG"` (C08–C13). **NIG no longer absorbs CDF or Non-Rated codes** — those live in `by_defaulted` and `by_non_rated` respectively
+- `by_defaulted: dict[str, GroupingHistory]` — single-key dict for PD = CDF (terminal state, not part of NIG)
+- `by_non_rated: dict[str, GroupingHistory]` — single-key dict for placeholder PD values (TBR / NTR / Unrated / NA / N/A / #REF / blank). Data-quality signal, not a credit assessment
+- `nig_distressed_substats: DistressedSubstats | None` — latest-period C13 subset (`period`, `committed`, `outstanding`, `facility_count`). Reported as an "of which" sub-line under NIG; Distressed is a sub-stat, not a peer bucket
 - `watchlist: WatchlistAggregate` (firm-level Watch-List Flag = "Y")
 - `top_contributors: ContributorBlock` — parent-level top-10 by committed/outstanding/wapd_numerator/cc_exposure
 - `top_wapd_facility_contributors: list[FacilityContributor]` — facility-level top-10 by `Weighted Average PD Numerator`. Each carries facility/parent IDs, committed, numerator, `implied_pd` (numerator ÷ committed), `pd_rating`, `regulatory_rating`, `share_of_numerator` (within scope)
@@ -368,7 +435,7 @@ Gated by `KRONOS_ERRORS_ENDPOINT_ENABLED`. Returns the tail of the active JSONL 
 - Responsive breakpoints at 860px and 480px
 
 ### Input Panel (Unified Card)
-1. **Quick Analysis** — 2×3 grid of canned prompt buttons from `prompts.json`
+1. **Quick Analysis** — grid of canned prompt buttons fetched from `GET /modes` at page load (sourced from `config/modes.yaml`). Modes flagged `parameterized: true` open a parameter dropdown populated from `GET /cube/parameter-options?mode=...` after a file is uploaded.
 2. **"or write your own question"** divider
 3. **Chat area** — auto-growing textarea with drag-drop file attach
 4. **File attachment strip** — format badge, filename, size, ✕ remove
@@ -395,8 +462,12 @@ Gated by `KRONOS_ERRORS_ENDPOINT_ENABLED`. Returns the tail of the active JSONL 
 - **Error path** — non-2xx, `{error}` body, or timeout surfaces as an inline red `.followup-error` row above the textarea with a Retry button (auto-scrolled into view). Retry re-reads the textarea so the user can edit before resending. Parent-aborts return silently
 - **Thread structure** — divider → thinking dots → message block with label + timestamp
 - **Metrics update** — follow-up with new metrics re-renders the Data Snapshot panel
+- **Conversation inheritance** — every follow-up reuses the original turn's `mode`, `parameters`, AND uploaded `file_b64` so the cube isn't re-derived from a different scope. The previous turn's narrative is sent as `prior_narrative`; `agent.py::_build_message_sequence()` shapes it as `[System, Human(context), AI(prior_narrative), Human(question)]` so the LLM sees genuine conversational history rather than a stateless single-shot
 
-Note: follow-ups currently hit stateless `/upload`. When true multi-turn state is needed, LangGraph's checkpointing capability is already installed — just add a checkpointer to `load_graph()` and a `thread_id` per session.
+### Loading State — Cancel Button
+- The pipeline-progress card on the loading screen has a Cancel button. It calls `primaryController.abort('user-cancel')` on the in-flight `runAnalysis()` fetch and returns the UI to the input state. Same `AbortController` pattern as the FAB follow-up — a hung backend never traps the user on the spinner.
+
+Note: follow-ups currently hit stateless `/upload` and seed history via `prior_narrative`. When true multi-turn state with full token-level memory is needed, LangGraph's checkpointing capability is already installed — just add a checkpointer to `load_graph()` and a `thread_id` per session.
 
 ### Pipeline Step Timings
 The landing-page pipeline animation previously used hardcoded fake delays (`STEP_DELAYS = [800, 1400, 600, 0, 500]`). Now:
@@ -409,22 +480,49 @@ The landing-page pipeline animation previously used hardcoded fake delays (`STEP
 
 ---
 
-## `prompts.json` — Modular Canned Prompts
+## YAML Mode Registry
 
-Buttons rendered from `static/prompts.json`. To add/remove/edit buttons, only touch this file:
+The mode list, per-mode metadata, and prompt templates all live in `config/` and are loaded once at app import by `pipeline/registry.py`. There is no `prompts.json` and no `pipeline/prompts.py` — both were deleted in this refactor.
 
-```json
-{
-  "title": "Button Label",
-  "desc": "Subtitle",
-  "mode": "mode-slug",
-  "prompt": "Full prompt text sent to the LLM"
-}
+### `config/modes.yaml`
+
+Each mode is a `ModeDefinition` (pydantic, `extra="forbid"`):
+
+```yaml
+modes:
+  - slug: portfolio-summary
+    template: lending
+    cube_slice: portfolio_summary       # must match a @register_slicer name
+    prompt_template: portfolio_summary  # config/prompts/portfolio_summary.md
+    display:
+      title: "Portfolio Summary"
+      desc:  "Executive view"
+    status: active                      # active | parameterized | placeholder
+    parameters: []                      # optional list of ParameterSpec
+
+  - slug: portfolio-level
+    template: lending
+    cube_slice: portfolio_level         # not yet wired → mode_not_implemented
+    prompt_template: portfolio_level
+    status: parameterized
+    parameters:
+      - name: portfolio
+        source: cube.available_portfolios
+        required: true
 ```
 
-`mode` slug must match: `MODE_MAP` key in `pipeline/analyze.py` AND `MODE_SYSTEM_PROMPTS` key in `pipeline/prompts.py`.
+### `config/prompts/*.md`
 
-Current slugs: `portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`.
+One markdown file per `prompt_template`. `pipeline/registry.py::load_prompt(mode, parameters)` reads the file and substitutes `{{name}}` placeholders against the validated parameters dict. The `default.md` fallback is used by the placeholder modes.
+
+### Adding a new mode (checklist)
+1. Write the slicer in `pipeline/processors/<template>/` and decorate it `@register_slicer("name")`.
+2. Append a `ModeDefinition` block to `config/modes.yaml` with `cube_slice: name`.
+3. Add `config/prompts/<prompt_template>.md`.
+4. Restart the app — `pipeline/registry.py` validates the YAML against the slicers found, and `GET /modes` will surface the new button automatically. No frontend change needed.
+
+### Tests
+`pipeline/tests/test_registry.py` enforces: YAML parses, every `cube_slice:` resolves to a registered slicer, every `prompt_template:` file exists, and parameter sources are valid. `pipeline/tests/test_label_collisions.py` catches `verifiable_values` label collisions across slicers.
 
 ---
 
@@ -530,24 +628,26 @@ When making a new change for the user, always:
 - [x] `index.html` — Full UI markup
 - [x] `styles.css` — Complete design system with dark mode + responsive + transparency layer styles
 - [x] `main.js` — All interactions: drag-drop, canned prompts, mode routing, pipeline animation, metric rendering, multi-turn chat, copy button, Analysis/Claims tabs, verification badge, data-used panel, mock fallback
-- [x] `prompts.json` — Modular canned prompts with mode slugs
-- [x] `pipeline/analyze.py` — Dispatcher with `MODE_MAP` (template + slicer per mode) + working `placeholder_processor()` for dev/demo
-- [x] `pipeline/agent.py` — **LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code pattern)** with `with_structured_output(NarrativeResponse)` inside the narrate node + plain text fallback
+- [x] `pipeline/analyze.py` — Dispatcher: registry lookup → classify → cube → `get_slicer()` call. Placeholder fallback for unwired modes
+- [x] `pipeline/registry.py` — **YAML-driven mode registry.** `@register_slicer` decorator, `load_registry()` validation, `validate_parameters(mode, params, cube)`, `load_prompt(mode, parameters)` with `{{param}}` substitution, `resolve_parameter_options()` for cube-backed dropdowns
+- [x] `config/modes.yaml` + `config/prompts/*.md` — Source of truth for mode list, UI labels, parameter schemas, and per-mode prompt text. Replaces deleted `pipeline/prompts.py` and `static/prompts.json`
+- [x] `pipeline/agent.py` — **LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code pattern)** with `with_structured_output(NarrativeResponse)` inside the narrate node + plain text fallback. `_build_message_sequence()` threads `prior_narrative` into follow-up turns as `[System, Human(context), AI(prior), Human(question)]`
 - [x] `pipeline/tracking.py` — **MLflow tracking layer gated by `KRONOS_MLFLOW_ENABLED`** (off by default). Logs tags, params, metrics, artifacts per request. Wraps `mlflow.start_run()` + `autolog()`
-- [x] `pipeline/prompts.py` — Global `SYSTEM_PROMPT` + per-mode `MODE_SYSTEM_PROMPTS` with TODO placeholders
-- [x] `pipeline/validate.py` — `cross_check_numbers()` numeric token cross-check, with ISO + prose date stripping to suppress date-rewrite false positives
+- [x] `pipeline/error_log.py` — Two-tier error capture (always-on JSONL + opt-in MLflow). Event-type slugs emitted from `server.py` for every failure class
+- [x] `pipeline/validate.py` — `cross_check_numbers()` numeric token cross-check + `verify_claims()` structured-claim verification against `verifiable_values`. ISO + prose date stripping suppresses date-rewrite false positives
+- [x] `pipeline/tests/` — pytest suite: `test_registry.py` (YAML schema + slicer cross-check), `test_validate.py` (date stripping, claim edge cases), `test_label_collisions.py`
 - [x] `requirements.txt` — flask, pandas, openpyxl, langchain, langchain-openai, **langgraph, langgraph-checkpoint**, azure-identity, **mlflow[databricks]**
 - [x] `EXPLAINME.md` — Plain-English walkthrough of every file + integration steps
 - [x] `VSCODE_CHEATSHEET.md` — Python import tracing + VS Code navigation shortcuts
 - [x] `aboutme.md` — Full integration guide with real architecture, checklist, work AI prompt
 - [x] Git repo initialized, pushed to GitHub `kronos` branch
 - [x] Narrative text dumps immediately (no typewriter delay)
-- [x] `mode` field wired end-to-end: `prompts.json` → button → `activeMode` → `formData` → server → `MODE_MAP`
+- [x] `mode` field wired end-to-end: `GET /modes` → button → `activeMode` → request body → registry lookup → slicer
 - [x] Bank-standard production pattern: LangGraph + ResponsesAgent + MLflow autolog (dormant)
 - [x] FAB follow-up: loading state on Send, inline error row with Retry, FAB hidden during in-flight request
 - [x] Real server-side stage timings returned in `/upload` response (`timings_ms`) and overwritten onto pipeline step labels; also logged to MLflow as `analyze_ms` / `llm_ms` / `verify_ms`
 - [x] `PULL_ME.md` sync-checklist workflow established for Domino pulls
-- [x] **Lending pipeline rebuilt as templates → classifier → cube → slicer.** New tree: `pipeline/templates/` (Template ABC + LendingTemplate with 37 columns tagged), `pipeline/scales/pd_scale.py` (C00…CDF + IG/NIG), `pipeline/parsers/regulatory_rating.py` (split-rating parser), `pipeline/loaders/classifier.py` (auto-detect by SIGNATURE), `pipeline/cube/` (pydantic schema + `compute_lending_cube` producing firm-level + by-industry/segment/branch/horizontal/IG-status + watchlist + top-contributors + MoM), `pipeline/processors/lending/firm_level.py` (first slicer). `pipeline/firm_level.py` deleted; `analyze.py` switched from `SCRIPT_MAP` to `MODE_MAP`. Multi-period correctness: cube selects latest period for stock metrics, eliminating the prior Jan+Feb double-counting bug
+- [x] **Lending pipeline rebuilt as templates → classifier → cube → slicer.** New tree: `pipeline/templates/` (Template ABC + LendingTemplate with 37 columns tagged), `pipeline/scales/pd_scale.py` (C00…CDF + IG/NIG), `pipeline/parsers/regulatory_rating.py` (split-rating parser), `pipeline/loaders/classifier.py` (auto-detect by SIGNATURE), `pipeline/cube/` (pydantic schema + `compute_lending_cube` producing firm-level + by-industry/segment/branch/horizontal/IG-status + watchlist + top-contributors + MoM), `pipeline/processors/lending/firm_level.py` (first slicer). `pipeline/firm_level.py` deleted. Multi-period correctness: cube selects latest period for stock metrics, eliminating the prior Jan+Feb double-counting bug
 - [x] `USE_MOCK_RESULTS` demo toggle in `main.js` — default `false` so real API errors are now visible. Flip to `true` to bypass Flask and render `getMockResult()` for presentations
 - [x] **JSON upload transport + workspace proxy workaround.** UI posts `application/json` with a base64 file payload so uploads survive the Domino workspace proxy (which drops multipart). `server.py` branches on `Content-Type` and wraps the decoded bytes in a `_Base64File` shim — processors downstream see no difference. Multipart path preserved for curl / published Apps.
 - [x] `main.js` resolves the fetch URL via `new URL('upload', document.baseURI).href` so the workspace URL prefix (`/aice-studio/workspace/<id>/proxy/5000/`) is preserved instead of being stripped by an absolute path.
@@ -555,23 +655,30 @@ When making a new change for the user, always:
 - [x] **Verified end-to-end on Domino workspace (2026-04-20):** upload → firm-level processor → Azure OpenAI narration → tiles rendered successfully inside the AICE Studio workspace (port 5000, host `0.0.0.0`)
 - [x] **FAB + follow-up state-machine hardening.** Module-level `followupController` (AbortController) + `followupInFlight` guard. `runAnalysis()` and the New Analysis button call `abortFollowup()` so a parent reset cancels the in-flight fetch. 60s fetch timeout fires `controller.abort('timeout')` so a hung Domino proxy can't pin the UI. Closing the FAB with a typed draft prompts to confirm. Empty submit triggers a shake+tint via reused `.shake` keyframe instead of silent no-op. Error row scrolls into view. Catch distinguishes timeout (user-facing message) vs parent abort (silent return)
 - [x] **Validator suppresses date-rewrite false positives.** `pipeline/validate.py` strips ISO (`YYYY-MM-DD`) and prose (`Month DD, YYYY`) dates from both narrative and context before tokenizing, so a context as-of date and the LLM's prose rewrite of it no longer contribute mismatched bare numbers
-- [x] **Portfolio Summary slicer wired.** `pipeline/processors/lending/portfolio_summary.py :: slice_portfolio_summary` produces an executive view from the existing cube (headline scale, IG/NIG mix, top-5 industries, top-5 parents, watchlist, period-over-period when ≥ 2 periods). Registered in `MODE_MAP`. Real system prompt in `pipeline/prompts.py["portfolio-summary"]` replaces the TODO placeholder.
+- [x] **Portfolio Summary slicer wired.** `pipeline/processors/lending/portfolio_summary.py` decorated with `@register_slicer("portfolio_summary")`. Produces an executive view from the existing cube (headline scale, IG/NIG mix, top-5 industries, top-5 parents, watchlist, period-over-period when ≥ 2 periods). Real system prompt at `config/prompts/portfolio_summary.md`.
 - [x] **Field renames in lending workbook header strings.** `Current Month Regulatory Rating` → `Regulatory Rating` and `Credit Watchlist Flag` → `Credit Watch List Flag` across `templates/lending.py`, `cube/lending.py`, `parsers/regulatory_rating.py` docs. Workbooks must use the new header names.
 - [x] **Facility-level WAPD contributors.** New `FacilityContributor` model + `LendingCube.top_wapd_facility_contributors` (firm-level top 10) + `LendingCube.wapd_contributors_by_horizontal` (top 10 per horizontal). Each entry carries facility/parent IDs, committed, `wapd_numerator`, `implied_pd` (numerator ÷ committed), `pd_rating`, `regulatory_rating`, `share_of_numerator` (within scope). Surfaced in Portfolio Summary as both an LLM-context block and a "Top 5 WAPD Drivers (Facility)" tile section. Per-horizontal map computed and stored in cube; not yet rendered by any slicer.
 - [x] **Reusable docs.** `LANGCHAIN_AZURE_FORMULA.md` (app-agnostic LangGraph + Azure OpenAI recipe) + `UI_tweaks.md` (cheatsheet for font/layout/card-order tweaks) at repo root.
+- [x] **YAML-driven mode registry (Round 11A).** `config/modes.yaml` + `config/prompts/*.md` + `pipeline/registry.py` replace `pipeline/prompts.py` + `static/prompts.json`. Frontend fetches button list from `GET /modes`. Slicers self-register via `@register_slicer("name")`. Parameter schemas declared per-mode; cube-backed dropdowns served by `GET /cube/parameter-options`. App-import validation: every YAML `cube_slice:` must resolve to a registered slicer, every `prompt_template:` file must exist.
+- [x] **Per-claim verifiable_values + verify_claims (Round 11B).** Slicers now return `verifiable_values: {label: value}` alongside `context` + `metrics`. `pipeline/validate.py::verify_claims()` resolves each LLM-returned claim against this dict, distinguishing mismatch (cited a known field with the wrong value) from field_not_found (cited a label outside the verifiable set). `pipeline/tests/test_label_collisions.py` ensures no two slicers ship colliding labels.
+- [x] **Cancel button on the loading screen (Round 11C).** `primaryController` (AbortController) wraps `runAnalysis()`; Cancel calls `primaryController.abort('user-cancel')` and resets the UI. A hung backend can no longer trap the user on the spinner.
+- [x] **Follow-up inheritance (Round 11D).** Every follow-up reuses the original turn's `mode`, `parameters`, AND uploaded `file_b64`, then sends the previous narrative as `prior_narrative`. `agent.py::_build_message_sequence()` shapes the input as `[System, Human(context), AI(prior), Human(question)]` so the LLM sees true conversational history. Sort determinism audit done across all cube outputs (explicit secondary tiebreakers: Ultimate Parent Code, Facility ID, rating code) so re-runs against the same data produce stable ordering.
+- [x] **Two-tier error logging (Round 11E).** `pipeline/error_log.py` writes always-on JSONL (`logs/kronos-errors.jsonl`, rotates ≥10 MB or date change) and emits MLflow artifacts when active. Eight stable event-type slugs hooked into every failure path in `server.py`. Per-tab session ID via `X-Kronos-Session` header for correlation. `GET /errors/recent` (gated, 404-when-disabled) for tail inspection. Field policy: full file/narrative/prompt content never logged; bounded snippets only.
+- [x] **Read-only deterministic-calculation audit (Round 12).** `docs/calculation-audit.md` — ten sections (overview, section inventory, KRI inventory matrix, sub-statistics audit, horizontal portfolio deep-dive, cross-section consistency checks, determinism audit, correctness spot-checks, ranked gaps, scoped recommendations). 19 ranked gaps identified. **Top high-severity findings (not fixed; documented for future work):** (1) IG/NIG silently buckets unrated PD codes as NIG via `~is_ig` mask in `pipeline/cube/lending.py:98-104`; (2) `_grouping_by_dim` drops NaN dim values via `.dropna().unique()` so by-industry/segment/branch sums don't reconcile against firm totals; (3) `cube.available_portfolios` returns industries but `portfolio-level`/`portfolio-comparison` modes read like horizontals — semantic ambiguity unresolved.
+- [x] **Five-category rating-composition refactor (Round 13).** Closes the first high-severity Round 12 audit finding (IG/NIG unrated bucketing). `pipeline/scales/pd_scale.py` adds `NON_RATED_TOKENS`, `is_non_rated()`, `distressed_code()`, `defaulted_code()`, and narrows `non_investment_grade_codes()` to **C08–C13 only** (no longer absorbs CDF). `pipeline/cube/lending.py` replaces the `~is_ig` fallback with five explicit masks (`ig`, `nig`, `defaulted`, `non_rated`, `distressed`) computed from `PD Rating`; populates new `LendingCube` fields `by_defaulted`, `by_non_rated`, and `nig_distressed_substats` (latest-period C13 subset). New `DistressedSubstats` pydantic model (`extra="forbid"`, fields: `period`, `committed`, `outstanding`, `facility_count`). Any PD value outside the union of the four non-sub-stat masks emits a `pd_rating_unclassified` warning (code + count + up-to-10 sample values) to `CubeMetadata.warnings` and a `log.warning` line. Firm-level and portfolio-summary slicers updated: "Investment-Grade Split" / "Investment-Grade Mix" renamed to "Rating Category Composition"; Distressed rendered as an indented "of which" sub-line/tile under NIG; Defaulted and Non-Rated rendered as separate buckets. `verifiable_values` extended with `Defaulted`, `Non-Rated`, `Distressed (of which)`, `Distressed facility count`, plus `(% of rated commitment)` / `(% of total commitment)` / `(% of NIG)` percentage labels. `% of rated commitment` = IG / (IG + NIG) — legacy semantic preserved; Defaulted and Non-Rated use `% of total commitment`. Prompt templates at `config/prompts/firm_level.md` and `config/prompts/portfolio_summary.md` rewritten to narrate the new composition with explicit guidance: frame Distressed as NIG subset, Defaulted as separate terminal-state concern, Non-Rated as data-quality signal. Tile sentiments: IG=neutral, NIG=neutral, Distressed=warning, Defaulted=negative, Non-Rated=neutral. Upstream data-contract assumption flagged (unverifiable in code): the WAPD numerator is assumed to already treat Non-Rated facilities as C07-weighted — documented on `_weighted_average` docstring.
 
 ### Still To Do
 - [ ] Install `aice-mlflow-plugins==0.1.3` in the bank Python environment (internal package)
 - [ ] Confirm Domino can reach Databricks MLflow from the KRONOS compute environment
 - [ ] Flip `KRONOS_MLFLOW_ENABLED=true` when Databricks / AICE access is provisioned
-- [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace remaining TODO placeholders for `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`)
-- [ ] Port remaining slicers (`concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) under `pipeline/processors/lending/` and register in `MODE_MAP` — `firm_level.py` and `portfolio_summary.py` are the working reference patterns. Cube already computes the data each will need (by_industry, by_horizontal, top_contributors, top_wapd_facility_contributors, wapd_contributors_by_horizontal, month_over_month)
+- [ ] Wire the parameterized placeholder modes (`portfolio-level`, `portfolio-comparison`): write the slicer + decorate `@register_slicer(...)`. Decide whether `cube.available_portfolios` should mean industries (current behavior) or horizontals (per Round 12 audit gap) before wiring; if horizontals, add `cube.available_horizontals`
+- [ ] Wire the plain placeholder modes (`concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) — slicer + YAML entry + `config/prompts/<name>.md`. Cube already computes the data each will need (by_industry, by_horizontal, top_contributors, top_wapd_facility_contributors, wapd_contributors_by_horizontal, month_over_month)
 - [ ] Surface `wapd_contributors_by_horizontal` in a slicer (currently computed but unused — natural fit for a per-horizontal narrative section, or a future Concentration Risk slicer)
-- [ ] Update `pipeline/prompts.py` firm-level system prompt for the richer cube context (IG/NIG split, horizontal portfolios, watchlist, multi-period coverage, validation note)
+- [ ] Address the remaining high-severity gaps in `docs/calculation-audit.md` — IG/NIG unrated bucketing closed in Round 13; still open: `_grouping_by_dim` NaN drop (by-industry/segment/branch sums don't reconcile against firm totals) and `available_portfolios` semantics (industries vs horizontals ambiguity)
+- [ ] Confirm with the data owner that the WAPD numerator (`Weighted Average PD Numerator`) already treats Non-Rated facilities as C07-weighted upstream — this is a data-contract assumption the cube cannot verify in code (flagged on `_weighted_average` docstring)
 - [ ] Build `deterministic_narrative_payload` in each slicer — mode-scoped, replaces `commentary_facts` as primary LLM input
 - [ ] Add `TradedProductsTemplate` (when field list is provided) and append to `classifier.TEMPLATES`
 - [ ] (optional) Delete the mock data path entirely once the Domino deploy is stable and demos no longer need a backend-less fallback
-- [ ] Update `prompts.json` with real mode slugs and prompt language for actual use cases
 - [ ] Test with real `.xlsx` files end-to-end
 - [ ] Test follow-up turns with metrics update
 - [ ] Test structured claims output with real processor data

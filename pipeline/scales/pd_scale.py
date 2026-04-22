@@ -5,12 +5,29 @@
 #   - Boundary is "≤ upper_bound": a PD value v gets the FIRST code
 #     in scale order whose upper_bound >= v.
 #   - Order: C00 (best) → CDF (worst). Lower index = upgrade.
-#   - Cutoff: C00..C07 = investment grade, C08..CDF = non-IG.
+#   - Rating-category split:
+#       C00..C07 = Investment Grade
+#       C08..C13 = Non-Investment Grade   (C13 is also "Distressed",
+#                                          tracked as a sub-stat of NIG)
+#       CDF      = Defaulted              (terminal state, top-level
+#                                          bucket peer to IG/NIG)
+#       Non-Rated = TBR / NTR / Unrated / NA / N/A / #REF / blank
+#                                          (placeholder values, not a
+#                                          credit assessment)
 # ──────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+import math
+from typing import Any, Optional
+
+
+# ── Non-Rated placeholder values ──────────────────────────────
+# Cell values that mean "no PD assessment", not "best PD assessment".
+# Match is case-insensitive and whitespace-stripped (see is_non_rated).
+NON_RATED_TOKENS: frozenset[str] = frozenset({
+    "TBR", "NTR", "UNRATED", "NA", "N/A", "#REF", "#REF!", "",
+})
 
 
 # Ordered best → worst. Each tuple = (code, upper_bound_inclusive).
@@ -42,8 +59,33 @@ _ORDERED_CODES: list[str]       = [code for code, _ in _SCALE]
 # C07 is the worst IG code; C08 is the first NIG code.
 IG_CUTOFF_INDEX = _INDEX["C07"]
 
+# Non-IG range upper bound: C13 is the worst NIG code (and also
+# Distressed). CDF sits OUTSIDE the IG/NIG split as its own
+# Defaulted bucket.
+NIG_LAST_INDEX  = _INDEX["C13"]
+
+# Codes that occupy their own top-level rating-category buckets.
+DISTRESSED_CODE = "C13"   # tracked as a sub-stat within NIG
+DEFAULTED_CODE  = "CDF"   # top-level peer to IG/NIG, not part of NIG
+
 
 # ── Mapping ───────────────────────────────────────────────────
+
+def is_non_rated(value: Any) -> bool:
+    """
+    True if `value` is a Non-Rated placeholder (TBR, NTR, Unrated, NA,
+    N/A, #REF, blank) or a missing value (None / NaN).
+
+    Match is case-insensitive and whitespace-stripped. Used by the cube
+    to bucket facilities whose PD Rating is a placeholder rather than an
+    actual code on the C-scale.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return str(value).strip().upper() in NON_RATED_TOKENS
+
 
 def code_for_pd(pd_value: Optional[float]) -> Optional[str]:
     """
@@ -117,13 +159,29 @@ def all_codes() -> list[str]:
 
 
 def investment_grade_codes() -> list[str]:
-    """Subset of codes considered investment grade."""
+    """Codes considered Investment Grade (C00..C07)."""
     return _ORDERED_CODES[: IG_CUTOFF_INDEX + 1]
 
 
 def non_investment_grade_codes() -> list[str]:
-    """Subset of codes considered non-investment grade."""
-    return _ORDERED_CODES[IG_CUTOFF_INDEX + 1 :]
+    """
+    Codes considered Non-Investment Grade (C08..C13).
+
+    Note: excludes CDF (Defaulted), which is a separate top-level
+    bucket. Includes C13, which is also flagged as Distressed and
+    tracked as a sub-stat of NIG in the cube.
+    """
+    return _ORDERED_CODES[IG_CUTOFF_INDEX + 1 : NIG_LAST_INDEX + 1]
+
+
+def distressed_code() -> str:
+    """The single PD code that marks Distressed facilities (C13)."""
+    return DISTRESSED_CODE
+
+
+def defaulted_code() -> str:
+    """The single PD code that marks Defaulted facilities (CDF)."""
+    return DEFAULTED_CODE
 
 
 def upper_bound(code: str) -> float:

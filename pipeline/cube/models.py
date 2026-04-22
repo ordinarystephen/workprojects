@@ -222,6 +222,28 @@ class WatchlistAggregate(BaseModel):
     outstanding:      float = 0.0
 
 
+# ── Distressed sub-stat (subset of Non-Investment Grade) ──────
+#
+# C13 facilities are part of the NIG bucket by rating, AND tracked
+# separately as Distressed by state. Reported in parallel to (not
+# inside) `by_ig_status["Non-Investment Grade"]` so KriBlock /
+# GroupingHistory stay uniform across all top-level buckets — see
+# the "Option C" decision in the rating-category refactor.
+#
+# Only the latest period is computed (no history) to keep the
+# parallel-field approach simple; expand if a downstream slicer
+# needs distressed-over-time.
+
+class DistressedSubstats(BaseModel):
+    """Latest-period totals for the C13 subset of NIG."""
+    model_config = ConfigDict(extra="forbid")
+
+    period:         date
+    committed:      float = 0.0
+    outstanding:    float = 0.0
+    facility_count: int   = 0
+
+
 # ── The Lending cube itself ───────────────────────────────────
 
 class LendingCube(BaseModel):
@@ -236,7 +258,24 @@ class LendingCube(BaseModel):
     by_branch:      dict[str, GroupingHistory] = Field(default_factory=dict)
     by_horizontal:  dict[str, GroupingHistory] = Field(default_factory=dict)
     by_ig_status:   dict[str, GroupingHistory] = Field(default_factory=dict)
-        # Keys: "Investment Grade" / "Non-Investment Grade".
+        # Keys: "Investment Grade" (C00..C07) / "Non-Investment Grade"
+        # (C08..C13). C13 is included in NIG; surfaced separately via
+        # `nig_distressed_substats`. CDF is NOT in NIG — see
+        # `by_defaulted` below.
+
+    by_defaulted:   dict[str, GroupingHistory] = Field(default_factory=dict)
+        # Top-level peer to IG/NIG. Single key "Defaulted" populated
+        # iff any facility has PD Rating == CDF in the latest period.
+
+    by_non_rated:   dict[str, GroupingHistory] = Field(default_factory=dict)
+        # Top-level peer. Single key "Non-Rated" populated iff any
+        # facility's PD Rating is a placeholder (TBR/NTR/Unrated/NA/
+        # N/A/#REF/blank) — see pd_scale.NON_RATED_TOKENS.
+
+    nig_distressed_substats: Optional[DistressedSubstats] = None
+        # Latest-period sub-stat for the C13 subset of NIG. Populated
+        # iff the NIG bucket has any C13 rows. None when NIG is empty
+        # or has no Distressed facilities.
 
     watchlist:      WatchlistAggregate
 

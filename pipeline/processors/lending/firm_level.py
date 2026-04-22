@@ -89,12 +89,13 @@ def slice_firm_level(cube: LendingCube) -> dict:
         + (f" (raw {walgd.raw:.4f})" if walgd.raw is not None else ""),
     ]
 
-    # IG / NIG split, if computable.
-    if cube.by_ig_status:
-        context_lines += ["", "Investment-grade split (committed exposure):"]
-        for label, hist in cube.by_ig_status.items():
-            committed = hist.current.totals.committed
-            context_lines.append(f"- {label}: ${committed:,.2f}")
+    # Rating-category composition (IG / NIG / Defaulted / Non-Rated,
+    # plus the Distressed sub-stat within NIG). Each top-level bucket
+    # appears only when it has any rows in the latest period.
+    rating_section = _rating_category_section(cube)
+    if rating_section:
+        context_lines += ["", "Rating-category composition (committed exposure):"]
+        context_lines += rating_section
 
     # Horizontal portfolios.
     if cube.by_horizontal:
@@ -158,13 +159,9 @@ def slice_firm_level(cube: LendingCube) -> dict:
         ],
     }
 
-    if cube.by_ig_status:
-        metrics["Investment-Grade Split"] = [
-            {"label": label,
-             "value": _money(hist.current.totals.committed),
-             "sentiment": "neutral"}
-            for label, hist in cube.by_ig_status.items()
-        ]
+    rating_tiles = _rating_category_tiles(cube)
+    if rating_tiles:
+        metrics["Rating Category Composition"] = rating_tiles
 
     if cube.by_horizontal:
         metrics["Horizontal Portfolios"] = [
@@ -223,10 +220,29 @@ def slice_firm_level(cube: LendingCube) -> dict:
             "value": walgd.display, "type": "string",
         }
 
-    # IG/NIG split — one entry per label.
+    # Rating-category buckets (IG/NIG/Defaulted/Non-Rated). Each label
+    # matches the English label used in the context section so the
+    # verifier in pipeline/validate.verify_claims can resolve citations.
     for label, hist in cube.by_ig_status.items():
         verifiable_values[label] = {
             "value": hist.current.totals.committed, "type": "currency",
+        }
+    for label, hist in cube.by_defaulted.items():
+        verifiable_values[label] = {
+            "value": hist.current.totals.committed, "type": "currency",
+        }
+    for label, hist in cube.by_non_rated.items():
+        verifiable_values[label] = {
+            "value": hist.current.totals.committed, "type": "currency",
+        }
+    # Distressed sub-stat (subset of NIG, reported as a separate figure).
+    if cube.nig_distressed_substats is not None:
+        ds = cube.nig_distressed_substats
+        verifiable_values["Distressed (of which)"] = {
+            "value": ds.committed, "type": "currency",
+        }
+        verifiable_values["Distressed facility count"] = {
+            "value": ds.facility_count, "type": "count",
         }
 
     # Horizontal portfolios — committed figure keyed by portfolio name.
@@ -268,3 +284,80 @@ def _cc_sentiment(cc_pct):
     if cc_pct > 0.05:
         return "warning"
     return "neutral"
+
+
+def _rating_category_section(cube: "LendingCube") -> list[str]:
+    """Prose lines for the rating-category composition block.
+
+    Distressed is rendered as an indented sub-line under NIG so the
+    LLM (and a human reader of the context) understand it's a subset,
+    not a peer bucket. Defaulted and Non-Rated are top-level peers.
+    """
+    lines: list[str] = []
+    if "Investment Grade" in cube.by_ig_status:
+        hist = cube.by_ig_status["Investment Grade"]
+        lines.append(
+            f"- Investment Grade: ${hist.current.totals.committed:,.2f}, "
+            f"{hist.current.counts.facilities:,} facilities"
+        )
+    if "Non-Investment Grade" in cube.by_ig_status:
+        hist = cube.by_ig_status["Non-Investment Grade"]
+        lines.append(
+            f"- Non-Investment Grade: ${hist.current.totals.committed:,.2f}, "
+            f"{hist.current.counts.facilities:,} facilities"
+        )
+        if cube.nig_distressed_substats is not None:
+            ds = cube.nig_distressed_substats
+            lines.append(
+                f"    Of which, Distressed (C13): ${ds.committed:,.2f}, "
+                f"{ds.facility_count:,} facilities"
+            )
+    for label, hist in cube.by_defaulted.items():
+        lines.append(
+            f"- {label}: ${hist.current.totals.committed:,.2f}, "
+            f"{hist.current.counts.facilities:,} facilities"
+        )
+    for label, hist in cube.by_non_rated.items():
+        lines.append(
+            f"- {label}: ${hist.current.totals.committed:,.2f}, "
+            f"{hist.current.counts.facilities:,} facilities"
+        )
+    return lines
+
+
+def _rating_category_tiles(cube: "LendingCube") -> list[dict]:
+    """Data Snapshot tiles for the rating-category composition."""
+    tiles: list[dict] = []
+    if "Investment Grade" in cube.by_ig_status:
+        hist = cube.by_ig_status["Investment Grade"]
+        tiles.append({
+            "label": "Investment Grade",
+            "value": _money(hist.current.totals.committed),
+            "sentiment": "neutral",
+        })
+    if "Non-Investment Grade" in cube.by_ig_status:
+        hist = cube.by_ig_status["Non-Investment Grade"]
+        tiles.append({
+            "label": "Non-Investment Grade",
+            "value": _money(hist.current.totals.committed),
+            "sentiment": "neutral",
+        })
+        if cube.nig_distressed_substats is not None:
+            tiles.append({
+                "label": "  of which Distressed",
+                "value": _money(cube.nig_distressed_substats.committed),
+                "sentiment": "warning",
+            })
+    for label, hist in cube.by_defaulted.items():
+        tiles.append({
+            "label": label,
+            "value": _money(hist.current.totals.committed),
+            "sentiment": "negative",
+        })
+    for label, hist in cube.by_non_rated.items():
+        tiles.append({
+            "label": label,
+            "value": _money(hist.current.totals.committed),
+            "sentiment": "neutral",
+        })
+    return tiles

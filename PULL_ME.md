@@ -293,3 +293,50 @@ Read-only audit of every calculation in `pipeline/cube/lending.py` and what each
 - MEDIUM cluster: dormant cube outputs (`by_segment`, `by_branch`, `wapd_contributors_by_horizontal`, `top_exposure_movers`, three of four `top_contributors.by_*` lists, `GroupingHistory.history`) computed but unused by any slicer.
 
 **Behavior change:** none — audit-only.
+
+---
+
+## Round 13 — PD rating-category bucketing (Part 1 of audit-fix series)
+
+Commit: _see `git log` on branch `kronos`_
+
+Addresses Round 12 HIGH finding #1. The IG/NIG `~is_ig` mask silently bucketed unrated/invalid PD codes as NIG. Replaced with explicit four-bucket classification:
+
+- **Investment Grade** (C00–C07)
+- **Non-Investment Grade** (C08–C13) — Distressed (C13) remains inside NIG and is reported as a parallel sub-stat
+- **Defaulted** (CDF) — new top-level peer, NOT part of NIG
+- **Non-Rated** (TBR / NTR / Unrated / NA / N/A / #REF / blank) — new top-level peer, treated as a data-quality signal
+
+Files:
+
+- [ ] `pipeline/scales/pd_scale.py` — added `NON_RATED_TOKENS` constant + `is_non_rated()` helper. **Narrowed `non_investment_grade_codes()` to `["C08"…"C13"]`** (previously returned through `CDF`). Added `distressed_code()` → `"C13"` and `defaulted_code()` → `"CDF"` helpers. Added `NIG_LAST_INDEX`, `DISTRESSED_CODE`, `DEFAULTED_CODE` module constants. Updated header docstring to document the five-category split.
+- [ ] `pipeline/cube/models.py` — added `DistressedSubstats` model (period + committed + outstanding + facility_count). Extended `LendingCube` with `by_defaulted: dict[str, GroupingHistory]`, `by_non_rated: dict[str, GroupingHistory]`, and `nig_distressed_substats: Optional[DistressedSubstats]` fields. Updated `by_ig_status` docstring to clarify that NIG includes C13 and CDF is NOT in NIG.
+- [ ] `pipeline/cube/lending.py` — replaced 7-line IG/NIG block with a 60-line five-mask classifier. Top-level buckets: IG, NIG, Defaulted, Non-Rated. Distressed (C13) masked separately but as a subset of NIG. **New invariant warning** — if `ig_mask | nig_mask | defaulted_mask | non_rated_mask` doesn't cover every row, logs a warning AND appends `{"code": "pd_rating_unclassified", "count", "sample_values"}` to `CubeMetadata.warnings`. Added WAPD-numerator upstream-contract note on `_weighted_average` docstring. New imports: `logging`, `DistressedSubstats`.
+- [ ] `pipeline/processors/lending/firm_level.py` — replaced "Investment-grade split" section with "Rating-category composition" (IG / NIG — with Distressed indented sub-line when present — Defaulted / Non-Rated). Tile group renamed "Investment-Grade Split" → "Rating Category Composition", sentiment encoding: IG=neutral, NIG=neutral, Distressed=warning, Defaulted=negative, Non-Rated=neutral. Two new helpers `_rating_category_section()` / `_rating_category_tiles()` at file bottom. `verifiable_values` now includes `by_defaulted` / `by_non_rated` entries plus `"Distressed (of which)"` and `"Distressed facility count"`.
+- [ ] `pipeline/processors/lending/portfolio_summary.py` — same composition extension as firm_level. **"% of rated commitment" denominator preserved as IG + NIG only** (legacy semantic; Defaulted sits outside NIG). Defaulted / Non-Rated rendered with "% of total commitment" shares. Distressed rendered as an indented sub-line with "% of NIG" share. Tile group renamed "Investment-Grade Mix" → "Rating Category Composition". `verifiable_values` extended with new labels + shares.
+- [ ] `config/prompts/firm_level.md` — extended to describe rating-category composition. Instructs the LLM when to call out Distressed (sub-line under NIG), Defaulted (separate terminal-state concern), and Non-Rated (data-quality signal). Claims examples updated with new labels.
+- [ ] `config/prompts/portfolio_summary.md` — extended narrative instructions for the new composition structure. Claims examples updated with new labels including `"Distressed (of which)"`, `"Distressed facility count"`, and the `"(% of NIG)"` / `"(% of total commitment)"` suffixes.
+
+### Open question — WAPD-numerator upstream contract (NOT fixed; needs data-owner confirmation)
+
+The business rule for Non-Rated facilities is that they are weighted as C07 when the `Weighted Average PD Numerator` column is computed. This substitution is expected to happen in the upstream Power BI exporter, not in the cube. **There is nothing in this codebase that verifies the upstream exporter actually does this.** The cube consumes the numerator column at face value.
+
+Flagged on `_weighted_average()` docstring in `pipeline/cube/lending.py`. Before we rely on WAPD figures that include Non-Rated rows, confirm with the Power BI / data-engineering owner that the numerator already accounts for the C07 substitution. If it doesn't, WAPD silently under-weights Non-Rated credits — an upstream data-contract fix, not a cube fix.
+
+### Behavior change
+
+- A workbook that previously reported NIG = "everything not C00..C07" now reports NIG = "only C08..C13". Unrated and CDF rows that used to inflate NIG now live in their own `Non-Rated` and `Defaulted` buckets. If a prior workbook run reported NIG committed of $X, the new run will report NIG less than or equal to $X, with the difference redistributed to Defaulted and/or Non-Rated.
+- New sentiment colors on the rating-category tiles (Defaulted = red, Distressed = amber). IG / NIG / Non-Rated stay `neutral`. Previously all IG/NIG tiles were `neutral`.
+- No breakage expected for existing prompts — the new labels are additive; the verifier resolves them the same way.
+
+### Compatibility
+
+- LendingCube model gains new fields with sensible defaults (`default_factory=dict` / `None`). Anything that currently builds a `LendingCube` continues to work; new slicers can pick up the new fields optionally.
+- `non_investment_grade_codes()` now returns a shorter list (7 codes instead of 8). Only caller in repo is `pipeline/cube/lending.py`, which has been updated accordingly. `docs/calculation-audit.md` references are now stale (the audit is point-in-time) — no rewrite planned.
+- No new dependencies.
+
+### Deferred (out of scope for this round)
+
+- Part 2 of the audit-fix series: unclassified-dim buckets in `_grouping_by_dim`.
+- Rendering `by_horizontal × Distressed` or similar cross-cuts.
+- Multi-period history for `DistressedSubstats` (currently latest-period only).

@@ -7,7 +7,9 @@
 #
 # Slices used:
 #   - firm_level.current.totals  → headline scale + C&C health
-#   - by_ig_status               → IG / NIG share of commitment
+#   - by_ig_status               → IG / NIG share of rated commitment
+#   - by_defaulted / by_non_rated → top-level peers to IG/NIG
+#   - nig_distressed_substats    → C13 subset within NIG (sub-line)
 #   - by_industry                → top-5 industry concentrations
 #   - top_contributors           → top-5 parents by committed
 #   - watchlist                  → firm-level watchlist signal
@@ -76,17 +78,47 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
     if current.walgd.display:
         context_lines.append(f"- Weighted Average LGD: {current.walgd.display}")
 
-    # ── IG / NIG mix ──────────────────────────────────────────
-    if cube.by_ig_status:
-        context_lines += ["", "Investment-grade mix (committed exposure):"]
-        ig_total = sum(
-            h.current.totals.committed for h in cube.by_ig_status.values()
-        )
-        for label, hist in cube.by_ig_status.items():
-            committed = hist.current.totals.committed
-            share = (committed / ig_total * 100) if ig_total > 0 else 0.0
+    # ── Rating-category composition ───────────────────────────
+    # IG / NIG are reported as shares of "rated commitment" (IG + NIG
+    # only — legacy semantic preserved now that Defaulted sits outside
+    # NIG). Defaulted and Non-Rated are top-level peers, each shown as
+    # a share of total commitment. Distressed is a sub-line under NIG
+    # using NIG as its natural denominator.
+    rated_total = sum(
+        h.current.totals.committed for h in cube.by_ig_status.values()
+    )
+    nig_committed = (
+        cube.by_ig_status["Non-Investment Grade"].current.totals.committed
+        if "Non-Investment Grade" in cube.by_ig_status else 0.0
+    )
+    if cube.by_ig_status or cube.by_defaulted or cube.by_non_rated:
+        context_lines += ["", "Rating-category composition (committed exposure):"]
+        for label in ("Investment Grade", "Non-Investment Grade"):
+            if label not in cube.by_ig_status:
+                continue
+            committed = cube.by_ig_status[label].current.totals.committed
+            share = (committed / rated_total * 100) if rated_total > 0 else 0.0
             context_lines.append(
                 f"- {label}: ${committed:,.2f} ({share:.2f}% of rated commitment)"
+            )
+            if label == "Non-Investment Grade" and cube.nig_distressed_substats is not None:
+                ds = cube.nig_distressed_substats
+                ds_share = (ds.committed / nig_committed * 100) if nig_committed > 0 else 0.0
+                context_lines.append(
+                    f"    Of which, Distressed (C13): ${ds.committed:,.2f} "
+                    f"({ds_share:.2f}% of NIG), {ds.facility_count:,} facilities"
+                )
+        for label, hist in cube.by_defaulted.items():
+            committed = hist.current.totals.committed
+            share = (committed / totals.committed * 100) if totals.committed > 0 else 0.0
+            context_lines.append(
+                f"- {label}: ${committed:,.2f} ({share:.2f}% of total commitment)"
+            )
+        for label, hist in cube.by_non_rated.items():
+            committed = hist.current.totals.committed
+            share = (committed / totals.committed * 100) if totals.committed > 0 else 0.0
+            context_lines.append(
+                f"- {label}: ${committed:,.2f} ({share:.2f}% of total commitment)"
             )
 
     # ── Top industry concentrations ───────────────────────────
@@ -213,15 +245,38 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
         ],
     }
 
-    if cube.by_ig_status:
-        ig_total = sum(h.current.totals.committed for h in cube.by_ig_status.values())
-        metrics["Investment-Grade Mix"] = [
-            {"label": label,
-             "value": (f"{(hist.current.totals.committed / ig_total * 100):.1f}%"
-                       if ig_total > 0 else "n/a"),
-             "sentiment": "neutral"}
-            for label, hist in cube.by_ig_status.items()
-        ]
+    if cube.by_ig_status or cube.by_defaulted or cube.by_non_rated:
+        rating_tiles: list[dict] = []
+        for label in ("Investment Grade", "Non-Investment Grade"):
+            if label not in cube.by_ig_status:
+                continue
+            committed = cube.by_ig_status[label].current.totals.committed
+            share_pct = (committed / rated_total * 100) if rated_total > 0 else None
+            rating_tiles.append({
+                "label": label,
+                "value": (f"{share_pct:.1f}%" if share_pct is not None else "n/a"),
+                "sentiment": "neutral",
+            })
+            if label == "Non-Investment Grade" and cube.nig_distressed_substats is not None:
+                rating_tiles.append({
+                    "label": "  of which Distressed",
+                    "value": _money(cube.nig_distressed_substats.committed),
+                    "sentiment": "warning",
+                })
+        for label, hist in cube.by_defaulted.items():
+            rating_tiles.append({
+                "label": label,
+                "value": _money(hist.current.totals.committed),
+                "sentiment": "negative",
+            })
+        for label, hist in cube.by_non_rated.items():
+            rating_tiles.append({
+                "label": label,
+                "value": _money(hist.current.totals.committed),
+                "sentiment": "neutral",
+            })
+        if rating_tiles:
+            metrics["Rating Category Composition"] = rating_tiles
 
     if top_industries:
         metrics[f"Top {len(top_industries)} Industries by Commitment"] = [
@@ -296,16 +351,44 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
             "value": current.walgd.display, "type": "string",
         }
 
-    # IG / NIG — publish both the committed figure and the share.
-    if cube.by_ig_status:
-        ig_total = sum(h.current.totals.committed for h in cube.by_ig_status.values())
-        for label, hist in cube.by_ig_status.items():
-            committed = hist.current.totals.committed
-            verifiable_values[label] = {"value": committed, "type": "currency"}
-            if ig_total > 0:
-                verifiable_values[f"{label} (% of rated commitment)"] = {
-                    "value": committed / ig_total, "type": "percentage",
-                }
+    # Rating-category buckets — publish committed figures and the
+    # relevant share for each. IG/NIG share is against "rated
+    # commitment" (IG + NIG). Defaulted and Non-Rated shares are
+    # against total commitment. Distressed is exposed as both a
+    # committed figure and a share of NIG.
+    for label, hist in cube.by_ig_status.items():
+        committed = hist.current.totals.committed
+        verifiable_values[label] = {"value": committed, "type": "currency"}
+        if rated_total > 0:
+            verifiable_values[f"{label} (% of rated commitment)"] = {
+                "value": committed / rated_total, "type": "percentage",
+            }
+    for label, hist in cube.by_defaulted.items():
+        committed = hist.current.totals.committed
+        verifiable_values[label] = {"value": committed, "type": "currency"}
+        if totals.committed > 0:
+            verifiable_values[f"{label} (% of total commitment)"] = {
+                "value": committed / totals.committed, "type": "percentage",
+            }
+    for label, hist in cube.by_non_rated.items():
+        committed = hist.current.totals.committed
+        verifiable_values[label] = {"value": committed, "type": "currency"}
+        if totals.committed > 0:
+            verifiable_values[f"{label} (% of total commitment)"] = {
+                "value": committed / totals.committed, "type": "percentage",
+            }
+    if cube.nig_distressed_substats is not None:
+        ds = cube.nig_distressed_substats
+        verifiable_values["Distressed (of which)"] = {
+            "value": ds.committed, "type": "currency",
+        }
+        verifiable_values["Distressed facility count"] = {
+            "value": ds.facility_count, "type": "count",
+        }
+        if nig_committed > 0:
+            verifiable_values["Distressed (% of NIG)"] = {
+                "value": ds.committed / nig_committed, "type": "percentage",
+            }
 
     # Top industries — name → committed dollars.
     for name, committed in top_industries:

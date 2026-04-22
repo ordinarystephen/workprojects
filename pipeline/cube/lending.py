@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import pandas as pd
@@ -22,6 +23,7 @@ from pipeline.cube.models import (
     ContributorBlock,
     Counts,
     CubeMetadata,
+    DistressedSubstats,
     ExposureMover,
     ExposureTotals,
     FacilityChange,
@@ -37,6 +39,13 @@ from pipeline.cube.models import (
 from pipeline.parsers import regulatory_rating as reg_rating
 from pipeline.scales import pd_scale
 from pipeline.templates.lending import LendingTemplate
+
+log = logging.getLogger(__name__)
+
+# Maximum number of unique unrecognized PD Rating values to surface in
+# the cube metadata warning when the rating-category classification
+# leaves rows uncovered.
+_UNCLASSIFIED_SAMPLE_LIMIT = 10
 
 
 # ── Tunables ──────────────────────────────────────────────────
@@ -94,14 +103,74 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
             continue
         by_horizontal[portfolio] = _grouping_history(df, periods, mask=mask)
 
-    # ── IG / NIG split (derived from PD Rating) ───────────────
-    ig_codes = set(pd_scale.investment_grade_codes())
-    is_ig = df["PD Rating"].astype(str).str.strip().str.upper().isin(ig_codes)
+    # ── Rating-category classification ────────────────────────
+    # Five mutually-exclusive buckets sourced from `PD Rating`:
+    #   Investment Grade     (C00..C07)
+    #   Non-Investment Grade (C08..C13 — includes Distressed)
+    #   Defaulted            (CDF)
+    #   Non-Rated            (placeholder values per pd_scale)
+    #
+    # Distressed (C13) is a subset of NIG, not a peer bucket, so its
+    # mask is NOT included in the coverage check (those rows are
+    # already counted under NIG). See nig_distressed_substats below.
+    pd_upper = df["PD Rating"].astype(str).str.strip().str.upper()
+    non_rated_mask  = df["PD Rating"].isna() | pd_upper.isin(pd_scale.NON_RATED_TOKENS)
+    ig_mask         = pd_upper.isin(set(pd_scale.investment_grade_codes()))     & ~non_rated_mask
+    nig_mask        = pd_upper.isin(set(pd_scale.non_investment_grade_codes())) & ~non_rated_mask
+    defaulted_mask  = (pd_upper == pd_scale.defaulted_code())                   & ~non_rated_mask
+    distressed_mask = (pd_upper == pd_scale.distressed_code())                  & ~non_rated_mask
+
     by_ig_status: dict[str, GroupingHistory] = {}
-    if is_ig.any():
-        by_ig_status["Investment Grade"] = _grouping_history(df, periods, mask=is_ig)
-    if (~is_ig).any():
-        by_ig_status["Non-Investment Grade"] = _grouping_history(df, periods, mask=~is_ig)
+    if ig_mask.any():
+        by_ig_status["Investment Grade"]     = _grouping_history(df, periods, mask=ig_mask)
+    if nig_mask.any():
+        by_ig_status["Non-Investment Grade"] = _grouping_history(df, periods, mask=nig_mask)
+
+    by_defaulted: dict[str, GroupingHistory] = {}
+    if defaulted_mask.any():
+        by_defaulted["Defaulted"] = _grouping_history(df, periods, mask=defaulted_mask)
+
+    by_non_rated: dict[str, GroupingHistory] = {}
+    if non_rated_mask.any():
+        by_non_rated["Non-Rated"] = _grouping_history(df, periods, mask=non_rated_mask)
+
+    # Distressed sub-stat within NIG (latest period only).
+    nig_distressed_substats: Optional[DistressedSubstats] = None
+    if nig_mask.any() and distressed_mask.any():
+        latest_distressed = latest_df[
+            (latest_df.index.isin(df[distressed_mask].index))
+        ]
+        if len(latest_distressed):
+            nig_distressed_substats = DistressedSubstats(
+                period=_to_date(latest_period),
+                committed=float(latest_distressed["Committed Exposure"].sum()),
+                outstanding=float(latest_distressed["Outstanding Exposure"].sum()),
+                facility_count=int(latest_distressed["Facility ID"].nunique()),
+            )
+
+    # Coverage invariant: every row must land in exactly one of the
+    # four top-level buckets. A row that doesn't indicates a PD Rating
+    # value the code doesn't recognize (e.g. a new code added to the
+    # bank's scale but not yet reflected in pd_scale.py). Warn but
+    # don't raise — the rest of the cube is still usable.
+    covered = ig_mask | nig_mask | defaulted_mask | non_rated_mask
+    unclassified_warnings: list[dict] = []
+    if (~covered).any():
+        unclassified = df.loc[~covered, "PD Rating"]
+        sample_vals = (
+            unclassified.dropna().astype(str).str.strip().unique().tolist()
+        )[:_UNCLASSIFIED_SAMPLE_LIMIT]
+        unclassified_count = int((~covered).sum())
+        log.warning(
+            "PD Rating classification left %d row(s) unclassified; sample values=%s",
+            unclassified_count,
+            sample_vals,
+        )
+        unclassified_warnings.append({
+            "code": "pd_rating_unclassified",
+            "count": unclassified_count,
+            "sample_values": sample_vals,
+        })
 
     # ── Watchlist firm-level aggregate ────────────────────────
     watchlist = _watchlist_aggregate(latest_df, latest_period)
@@ -144,6 +213,7 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
         as_of=_to_date(latest_period),
         periods=[_to_date(p) for p in periods],
         row_count=len(df),
+        warnings=unclassified_warnings,
     )
 
     return LendingCube(
@@ -154,6 +224,9 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
         by_branch=by_branch,
         by_horizontal=by_horizontal,
         by_ig_status=by_ig_status,
+        by_defaulted=by_defaulted,
+        by_non_rated=by_non_rated,
+        nig_distressed_substats=nig_distressed_substats,
         watchlist=watchlist,
         top_contributors=top_contribs,
         top_wapd_facility_contributors=top_wapd_facilities,
@@ -242,7 +315,17 @@ def _weighted_average(
     df: pd.DataFrame,
     display: str,
 ) -> WeightedAverage:
-    """Compute a weighted average and render it per the display rule."""
+    """Compute a weighted average and render it per the display rule.
+
+    Upstream data-contract assumption (NOT verifiable in code): the
+    exporter is expected to produce `Weighted Average PD Numerator =
+    PD × Committed Exposure` per row, with Non-Rated facilities
+    (TBR/NTR/Unrated/…) weighted as if they were C07. This substitution
+    is a business rule of the Power BI export, not a cube-level
+    transform. If the numerator column does not reflect it, the WAPD
+    figures this function produces will silently under-weight
+    Non-Rated credits.
+    """
     num = float(df[numerator_col].sum()) if numerator_col in df.columns else 0.0
     den = float(df[denominator_col].sum()) if denominator_col in df.columns else 0.0
     if den == 0:
