@@ -434,6 +434,17 @@ When in doubt, add a parenthetical disambiguator (see
 `<facility> (WAPD numerator)` pair).
 
 ---
+### Label-form conventions across slicers
+Firm-wide slicers (firm_level) publish totals using bare labels: Committed Exposure, Outstanding Exposure, Criticized & Classified (SM + SS + Dbt + L). The context is entirely firm-wide, so "Total" is implicit.
+
+Summary slicers that juxtapose totals against slice-level figures (portfolio_summary) publish firm totals using explicit "Total" prefixes: Total Committed Exposure, Total Outstanding Exposure, Criticized & Classified exposure (SM + SS + Dbt + L). The "Total" prefix disambiguates firm-level aggregates from per-industry figures in the same context.
+
+Per-slice slicers (industry_portfolio_level, horizontal_portfolio_level) use full prefix disambiguation (Industry Portfolio: <name> — Committed Exposure).
+
+When adding a new slicer, pick the convention that matches the scope the slicer operates at:
+- If the entire context is one scope (firm-wide, or one slice), use bare labels or the slice prefix respectively.
+- If the slicer juxtaposes multiple scopes (firm + slices, or slice + sub-slices), use explicit qualifiers ("Total ...", "Firm ...", etc.) to disambiguate.
+---
 
 ## Quick map: cube field → publishing slicers
 

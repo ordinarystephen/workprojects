@@ -300,6 +300,19 @@ mode — the dropdown is rendered from the YAML's parameter spec.
 Before publishing a new label, scan
 [available-kris.md](available-kris.md) for collisions.
 
+
+### Label-form conventions across slicers
+Firm-wide slicers (firm_level) publish totals using bare labels: Committed Exposure, Outstanding Exposure, Criticized & Classified (SM + SS + Dbt + L). The context is entirely firm-wide, so "Total" is implicit.
+
+Summary slicers that juxtapose totals against slice-level figures (portfolio_summary) publish firm totals using explicit "Total" prefixes: Total Committed Exposure, Total Outstanding Exposure, Criticized & Classified exposure (SM + SS + Dbt + L). The "Total" prefix disambiguates firm-level aggregates from per-industry figures in the same context.
+
+Per-slice slicers (industry_portfolio_level, horizontal_portfolio_level) use full prefix disambiguation (Industry Portfolio: <name> — Committed Exposure).
+
+When adding a new slicer, pick the convention that matches the scope the slicer operates at:
+- If the entire context is one scope (firm-wide, or one slice), use bare labels or the slice prefix respectively.
+- If the slicer juxtaposes multiple scopes (firm + slices, or slice + sub-slices), use explicit qualifiers ("Total ...", "Firm ...", etc.) to disambiguate.
+
+
 ### Prompt instructions: cite verbatim
 
 Every prompt should explicitly tell the LLM:
@@ -354,6 +367,22 @@ require byte-identical re-runs. Patterns to follow:
   before iterating (see Round 15 fix in
   [pipeline/cube/lending.py](../pipeline/cube/lending.py)).
 
+
+### Active vs placeholder: what to ship first
+ 
+When starting a new mode, default to shipping the registry entry before the slicer is real. Add the mode as `status: placeholder` — it will appear in the UI but return `mode_not_implemented` cleanly when a user clicks it. Flip to `active` in a later commit once the slicer and prompt are in place.
+ 
+This pattern is useful when:
+ 
+- You're wiring the parameter surface (YAML parameter definitions, frontend dropdown source) before the slicer exists and want to exercise the plumbing early.
+- A mode is architecturally meaningful but depends on cube work that hasn't landed yet (e.g. `industry-within-horizontal` depends on facility-level cube exposure).
+- You want to reserve a slug so the UI shows "coming soon" buttons, making the roadmap visible to users without committing to implementation timing.
+What to avoid:
+ 
+- Don't add a mode as `active` with a half-written slicer "to be finished later." Startup validation will either fail loudly (if `cube_slice` references an unregistered slicer) or worse, let the mode silently misbehave in production.
+- Don't leave modes as `placeholder` indefinitely after their implementation lands. Flip to `active` as soon as the slicer and prompt are committed — stale placeholders confuse users who click and get `mode_not_implemented` on something that looks implemented.
+The `status` field is cheap to change. Use it as a deliberate signal about where each mode is in its lifecycle.
+ 
 ---
 
 ## 5. Testing
