@@ -852,6 +852,14 @@ def _pd_rating_changes(
         .groupby("Facility ID").first()[["PD Rating", "Facility Name", "Ultimate Parent Name"]]
 
     joined = c.join(p, lsuffix="_current", rsuffix="_prior", how="inner")
+    # Explicit sort on Facility ID — groupby's sort=True default already
+    # produces this order today, but the explicit key documents the
+    # contract and survives a refactor (e.g. anyone adding sort=False).
+    joined = (
+        joined.reset_index()
+              .sort_values("Facility ID", ascending=True)
+              .set_index("Facility ID")
+    )
 
     out: list[RatingChange] = []
     for fid, row in joined.iterrows():
@@ -886,6 +894,14 @@ def _reg_rating_changes(
         .groupby("Facility ID").first()[cols]
 
     joined = c.join(p, lsuffix="_current", rsuffix="_prior", how="inner")
+    # Explicit sort on Facility ID — see _pd_rating_changes for the
+    # rationale: documents the determinism contract independent of
+    # groupby's sort=True default.
+    joined = (
+        joined.reset_index()
+              .sort_values("Facility ID", ascending=True)
+              .set_index("Facility ID")
+    )
 
     out: list[RatingChange] = []
     for fid, row in joined.iterrows():
