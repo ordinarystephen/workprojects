@@ -74,7 +74,7 @@ class ParameterDefinition(BaseModel):
 
     name: str
     type: Literal["enum", "string", "integer", "number"]
-    source: Optional[str] = None         # e.g. "cube.available_portfolios"
+    source: Optional[str] = None         # e.g. "cube.available_industries" or "cube.available_horizontals"
     values: Optional[list[str]] = None   # static enum
     required: bool = True
     default: Any = None
@@ -170,8 +170,10 @@ def load_registry() -> Registry:
     # decorators to run, populating _SLICERS. Done lazily inside
     # this function so the registry can be reloaded in tests
     # without import-order surprises.
-    import pipeline.processors.lending.firm_level         # noqa: F401
-    import pipeline.processors.lending.portfolio_summary  # noqa: F401
+    import pipeline.processors.lending.firm_level                 # noqa: F401
+    import pipeline.processors.lending.portfolio_summary          # noqa: F401
+    import pipeline.processors.lending.industry_portfolio_level   # noqa: F401
+    import pipeline.processors.lending.horizontal_portfolio_level # noqa: F401
 
     if not _MODES_PATH.exists():
         raise RegistryError(f"config/modes.yaml not found at {_MODES_PATH}")
@@ -308,7 +310,7 @@ def list_modes_for_ui() -> list[ModeDefinition]:
 # ══════════════════════════════════════════════════════════════
 
 def _resolve_cube_field(cube: Any, dotted: str) -> Any:
-    """Walk dotted attribute path from a cube. e.g. 'cube.available_portfolios'."""
+    """Walk dotted attribute path from a cube. e.g. 'cube.available_industries'."""
     if not dotted.startswith("cube."):
         raise ParameterError(f"Unsupported parameter source: {dotted}")
     rest = dotted[len("cube."):]

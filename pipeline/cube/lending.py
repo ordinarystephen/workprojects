@@ -32,7 +32,9 @@ from pipeline.cube.models import (
     KriBlock,
     LendingCube,
     MomBlock,
+    PortfolioSlice,
     RatingChange,
+    RatingComposition,
     WatchlistAggregate,
     WeightedAverage,
 )
@@ -93,12 +95,14 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
     by_branch   = _grouping_by_dim(df, periods, "UBS Branch Name")
 
     # ── Horizontal portfolios ─────────────────────────────────
+    # Predicates come from LendingTemplate.horizontal_definitions() —
+    # the single source of truth for horizontal business rules. Adding
+    # a horizontal is a one-line FIELDS entry on LendingTemplate; no
+    # change needed here.
+    horizontal_predicates = LendingTemplate.horizontal_definitions()
     by_horizontal: dict[str, GroupingHistory] = {}
-    for col, spec in LendingTemplate.FIELDS.items():
-        if spec.role != "horizontal_flag":
-            continue
-        portfolio = spec.portfolio_name or col
-        mask = df[col].astype(str).str.strip() == str(spec.trigger_value).strip()
+    for portfolio, predicate in horizontal_predicates.items():
+        mask = predicate(df)
         if not mask.any():
             continue
         by_horizontal[portfolio] = _grouping_history(df, periods, mask=mask)
@@ -113,12 +117,12 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
     # Distressed (C13) is a subset of NIG, not a peer bucket, so its
     # mask is NOT included in the coverage check (those rows are
     # already counted under NIG). See nig_distressed_substats below.
-    pd_upper = df["PD Rating"].astype(str).str.strip().str.upper()
-    non_rated_mask  = df["PD Rating"].isna() | pd_upper.isin(pd_scale.NON_RATED_TOKENS)
-    ig_mask         = pd_upper.isin(set(pd_scale.investment_grade_codes()))     & ~non_rated_mask
-    nig_mask        = pd_upper.isin(set(pd_scale.non_investment_grade_codes())) & ~non_rated_mask
-    defaulted_mask  = (pd_upper == pd_scale.defaulted_code())                   & ~non_rated_mask
-    distressed_mask = (pd_upper == pd_scale.distressed_code())                  & ~non_rated_mask
+    rating_masks = _compute_rating_masks(df)
+    ig_mask         = rating_masks["ig"]
+    nig_mask        = rating_masks["nig"]
+    defaulted_mask  = rating_masks["defaulted"]
+    non_rated_mask  = rating_masks["non_rated"]
+    distressed_mask = rating_masks["distressed"]
 
     by_ig_status: dict[str, GroupingHistory] = {}
     if ig_mask.any():
@@ -135,18 +139,13 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
         by_non_rated["Non-Rated"] = _grouping_history(df, periods, mask=non_rated_mask)
 
     # Distressed sub-stat within NIG (latest period only).
-    nig_distressed_substats: Optional[DistressedSubstats] = None
-    if nig_mask.any() and distressed_mask.any():
-        latest_distressed = latest_df[
-            (latest_df.index.isin(df[distressed_mask].index))
-        ]
-        if len(latest_distressed):
-            nig_distressed_substats = DistressedSubstats(
-                period=_to_date(latest_period),
-                committed=float(latest_distressed["Committed Exposure"].sum()),
-                outstanding=float(latest_distressed["Outstanding Exposure"].sum()),
-                facility_count=int(latest_distressed["Facility ID"].nunique()),
-            )
+    nig_distressed_substats = _distressed_substats(
+        df=df,
+        period_col=period_col,
+        latest_period=latest_period,
+        nig_mask=nig_mask,
+        distressed_mask=distressed_mask,
+    )
 
     # Coverage invariant: every row must land in exactly one of the
     # four top-level buckets. A row that doesn't indicates a PD Rating
@@ -192,22 +191,64 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
     top_contribs = _top_contributors(latest_df, latest_period)
 
     # ── Facility-level WAPD drivers (firm + per-horizontal) ───
+    # Reuses horizontal_predicates above so the per-horizontal slice
+    # definition is identical to by_horizontal — there is no second
+    # definition of "what is in horizontal X" anywhere in the cube.
     top_wapd_facilities = _top_wapd_facility_contributors(latest_df)
     wapd_by_horizontal: dict[str, list[FacilityContributor]] = {}
-    for col, spec in LendingTemplate.FIELDS.items():
-        if spec.role != "horizontal_flag":
-            continue
-        portfolio = spec.portfolio_name or col
-        if col not in latest_df.columns:
-            continue
-        h_mask = (
-            latest_df[col].astype(str).str.strip()
-            == str(spec.trigger_value).strip()
-        )
+    for portfolio, predicate in horizontal_predicates.items():
+        h_mask = predicate(latest_df)
         if not h_mask.any():
             continue
         wapd_by_horizontal[portfolio] = _top_wapd_facility_contributors(
             latest_df[h_mask]
+        )
+
+    # ── Per-industry composite slices (PortfolioSlice each) ───
+    # Same partition the by_industry dict above was built from — re-
+    # derive the normalized column once so both views agree on which
+    # rows belong to "Energy", "Unclassified", etc. The GroupingHistory
+    # we hand to _build_portfolio_slice is the same instance already
+    # stored in by_industry — no recompute, no duplicate object.
+    industry_details: dict[str, PortfolioSlice] = {}
+    if "Risk Assessment Industry" in df.columns:
+        normalized_industry = df["Risk Assessment Industry"].apply(_normalize_dim)
+        for industry_name, industry_grouping in by_industry.items():
+            slice_mask = normalized_industry == industry_name
+            industry_details[industry_name] = _build_portfolio_slice(
+                name=industry_name,
+                slice_mask=slice_mask,
+                grouping=industry_grouping,
+                df=df,
+                periods=periods,
+                period_col=period_col,
+                latest_period=latest_period,
+                latest_df=latest_df,
+                rating_masks=rating_masks,
+            )
+
+    # ── Per-horizontal composite slices (PortfolioSlice each) ─
+    # Identical predicates to by_horizontal — single source of truth
+    # is LendingTemplate.horizontal_definitions(). Same predicate, same
+    # mask, same GroupingHistory instance as by_horizontal[name].
+    horizontal_details: dict[str, PortfolioSlice] = {}
+    for portfolio, predicate in horizontal_predicates.items():
+        horizontal_grouping = by_horizontal.get(portfolio)
+        if horizontal_grouping is None:
+            # by_horizontal skips empty masks; mirror that here so the
+            # two dicts always have the same key set.
+            continue
+        slice_mask = predicate(df)
+        horizontal_details[portfolio] = _build_portfolio_slice(
+            name=portfolio,
+            slice_mask=slice_mask,
+            grouping=horizontal_grouping,
+            df=df,
+            periods=periods,
+            period_col=period_col,
+            latest_period=latest_period,
+            latest_df=latest_df,
+            rating_masks=rating_masks,
         )
 
     # ── Month-over-month (only if ≥ 2 periods) ────────────────
@@ -244,7 +285,145 @@ def compute_lending_cube(df: pd.DataFrame) -> LendingCube:
         top_contributors=top_contribs,
         top_wapd_facility_contributors=top_wapd_facilities,
         wapd_contributors_by_horizontal=wapd_by_horizontal,
+        industry_details=industry_details,
+        horizontal_details=horizontal_details,
         month_over_month=mom,
+    )
+
+
+# ── Rating-mask helpers ───────────────────────────────────────
+#
+# The five-category rating split (Part 1) is computed once against
+# the full DataFrame and reused for firm-level and per-slice (industry,
+# horizontal) rating breakdowns. Computing once guarantees that the
+# rules are identical at every level — no risk of an industry slice
+# bucketing C13 differently from the firm level.
+
+def _compute_rating_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Return the five PD-rating masks indexed by df.index.
+
+    Keys:
+        ig          C00..C07
+        nig         C08..C13          (includes Distressed)
+        defaulted   CDF
+        non_rated   placeholder values per pd_scale.NON_RATED_TOKENS
+        distressed  C13               (subset of nig — NOT a peer bucket)
+
+    `non_rated` takes priority over the C-code masks: a row whose PD
+    Rating is in NON_RATED_TOKENS is excluded from ig/nig/defaulted/
+    distressed even if the upper-cased token coincidentally matches a
+    C-code (defensive — avoids a bad upstream value double-counting).
+    """
+    pd_upper = df["PD Rating"].astype(str).str.strip().str.upper()
+    non_rated = df["PD Rating"].isna() | pd_upper.isin(pd_scale.NON_RATED_TOKENS)
+    return {
+        "ig":         pd_upper.isin(set(pd_scale.investment_grade_codes()))     & ~non_rated,
+        "nig":        pd_upper.isin(set(pd_scale.non_investment_grade_codes())) & ~non_rated,
+        "defaulted":  (pd_upper == pd_scale.defaulted_code())                   & ~non_rated,
+        "non_rated":  non_rated,
+        "distressed": (pd_upper == pd_scale.distressed_code())                  & ~non_rated,
+    }
+
+
+def _distressed_substats(
+    *,
+    df: pd.DataFrame,
+    period_col: str,
+    latest_period,
+    nig_mask: pd.Series,
+    distressed_mask: pd.Series,
+) -> Optional[DistressedSubstats]:
+    """Latest-period C13 subset within a slice. None when the slice has
+    no NIG rows or no Distressed rows in the latest period."""
+    if not (nig_mask.any() and distressed_mask.any()):
+        return None
+    latest_distressed = df[(df[period_col] == latest_period) & distressed_mask]
+    if not len(latest_distressed):
+        return None
+    return DistressedSubstats(
+        period=_to_date(latest_period),
+        committed=float(latest_distressed["Committed Exposure"].sum()),
+        outstanding=float(latest_distressed["Outstanding Exposure"].sum()),
+        facility_count=int(latest_distressed["Facility ID"].nunique()),
+    )
+
+
+def _rating_composition_for_slice(
+    *,
+    df: pd.DataFrame,
+    periods: list,
+    period_col: str,
+    latest_period,
+    slice_mask: pd.Series,
+    rating_masks: dict[str, pd.Series],
+) -> RatingComposition:
+    """Build a per-slice five-category breakdown by intersecting the
+    slice mask with each rating mask. Bucket fields are None when the
+    slice has zero rows in that bucket."""
+    ig_slice         = slice_mask & rating_masks["ig"]
+    nig_slice        = slice_mask & rating_masks["nig"]
+    defaulted_slice  = slice_mask & rating_masks["defaulted"]
+    non_rated_slice  = slice_mask & rating_masks["non_rated"]
+    distressed_slice = slice_mask & rating_masks["distressed"]
+
+    return RatingComposition(
+        investment_grade=(
+            _grouping_history(df, periods, mask=ig_slice) if ig_slice.any() else None
+        ),
+        non_investment_grade=(
+            _grouping_history(df, periods, mask=nig_slice) if nig_slice.any() else None
+        ),
+        defaulted=(
+            _grouping_history(df, periods, mask=defaulted_slice) if defaulted_slice.any() else None
+        ),
+        non_rated=(
+            _grouping_history(df, periods, mask=non_rated_slice) if non_rated_slice.any() else None
+        ),
+        distressed_substats=_distressed_substats(
+            df=df,
+            period_col=period_col,
+            latest_period=latest_period,
+            nig_mask=nig_slice,
+            distressed_mask=distressed_slice,
+        ),
+    )
+
+
+def _build_portfolio_slice(
+    *,
+    name: str,
+    slice_mask: pd.Series,
+    grouping: GroupingHistory,
+    df: pd.DataFrame,
+    periods: list,
+    period_col: str,
+    latest_period,
+    latest_df: pd.DataFrame,
+    rating_masks: dict[str, pd.Series],
+) -> PortfolioSlice:
+    """Bundle a slice's grouping, rating composition, contributors,
+    watchlist, and facility-level WAPD drivers into one container.
+
+    `grouping` is passed in (not recomputed) so PortfolioSlice.grouping
+    is the SAME instance held by cube.by_industry[name] / by_horizontal
+    [name]. Caller MUST pass the GroupingHistory built from `slice_mask`
+    on the same df / periods — the cube would silently disagree with
+    itself otherwise."""
+    latest_slice_df = latest_df[slice_mask.reindex(latest_df.index, fill_value=False)]
+    return PortfolioSlice(
+        name=name,
+        grouping=grouping,
+        rating_composition=_rating_composition_for_slice(
+            df=df,
+            periods=periods,
+            period_col=period_col,
+            latest_period=latest_period,
+            slice_mask=slice_mask,
+            rating_masks=rating_masks,
+        ),
+        top_contributors=_top_contributors(latest_slice_df, latest_period),
+        watchlist=_watchlist_aggregate(latest_slice_df, latest_period),
+        top_wapd_facilities=_top_wapd_facility_contributors(latest_slice_df),
     )
 
 

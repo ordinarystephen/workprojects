@@ -244,6 +244,55 @@ class DistressedSubstats(BaseModel):
     facility_count: int   = 0
 
 
+# ── Per-slice rating composition (Part 1 structure, scoped) ──
+#
+# The firm-level cube exposes the five-category breakdown via four
+# parallel dicts (by_ig_status / by_defaulted / by_non_rated) plus
+# nig_distressed_substats. For per-industry and per-horizontal slices
+# the same shape is bundled into one RatingComposition for ergonomics
+# — slicers iterate one container instead of five.
+#
+# Any of the four GroupingHistory fields is None when the slice has
+# zero rows in that bucket (rather than an empty GroupingHistory).
+# distressed_substats is None when the slice has no C13 rows in the
+# latest period.
+
+class RatingComposition(BaseModel):
+    """Five-category rating breakdown for one slice (industry / horizontal)."""
+    model_config = ConfigDict(extra="forbid")
+
+    investment_grade:     Optional[GroupingHistory] = None  # C00..C07
+    non_investment_grade: Optional[GroupingHistory] = None  # C08..C13
+    defaulted:            Optional[GroupingHistory] = None  # CDF
+    non_rated:            Optional[GroupingHistory] = None  # placeholder values
+    distressed_substats:  Optional[DistressedSubstats] = None  # C13 subset of NIG
+
+
+# ── Portfolio slice (industry or horizontal) ─────────────────
+#
+# Container for everything an industry-level or horizontal-level
+# slicer needs about its scope: the period-level KRIs (grouping),
+# the rating-category breakdown, the parent-level top contributors,
+# the watchlist aggregate, and the facility-level WAPD drivers
+# computed within that scope.
+#
+# `name` is the slice's display label (the industry name or the
+# horizontal portfolio name). It matches the key in the cube's
+# industry_details / horizontal_details dict — duplicated on the
+# slice so the slicer can use it without threading the key.
+
+class PortfolioSlice(BaseModel):
+    """All cube data scoped to a single industry or horizontal portfolio."""
+    model_config = ConfigDict(extra="forbid")
+
+    name:                str
+    grouping:            "GroupingHistory"
+    rating_composition:  RatingComposition
+    top_contributors:    "ContributorBlock"
+    watchlist:           "WatchlistAggregate"
+    top_wapd_facilities: list["FacilityContributor"] = Field(default_factory=list)
+
+
 # ── The Lending cube itself ───────────────────────────────────
 
 class LendingCube(BaseModel):
@@ -286,15 +335,36 @@ class LendingCube(BaseModel):
     top_wapd_facility_contributors: list[FacilityContributor] = Field(default_factory=list)
     wapd_contributors_by_horizontal: dict[str, list[FacilityContributor]] = Field(default_factory=dict)
 
+    # ── Per-slice composites (industry, horizontal) ───────────
+    # Rich slice containers for industry-level and horizontal-level
+    # slicers. Each PortfolioSlice carries the slice's KRI grouping,
+    # rating-category composition (Part 1 structure), top parents,
+    # watchlist aggregate, and facility-level WAPD drivers.
+    #
+    # The flat by_industry / by_horizontal dicts above are kept
+    # alongside these so the firm-level and portfolio-summary
+    # slicers (which only need a GroupingHistory) don't have to
+    # navigate the richer structure. The two views are computed
+    # from the same masks, so per-slice committed totals match.
+    industry_details:   dict[str, PortfolioSlice] = Field(default_factory=dict)
+    horizontal_details: dict[str, PortfolioSlice] = Field(default_factory=dict)
+
     # Populated only when the file contains ≥ 2 periods.
     month_over_month: Optional[MomBlock] = None
 
     # ── Parameter-picker sources ──────────────────────────────
-    # Exposed for the mode registry: `source: cube.available_portfolios`
-    # in config/modes.yaml resolves here. A "portfolio" in this app is
-    # a risk-assessment industry — swap to `by_horizontal` if the
-    # domain definition changes.
+    # Exposed for the mode registry. A YAML parameter declaration
+    # like `source: cube.available_industries` resolves here. The
+    # legacy `available_portfolios` was ambiguous once horizontal
+    # portfolios joined industry portfolios as a peer concept —
+    # picker sources now name the kind explicitly.
 
     @property
-    def available_portfolios(self) -> list[str]:
+    def available_industries(self) -> list[str]:
+        """Industry-portfolio names (Risk Assessment Industry partition)."""
         return sorted(self.by_industry.keys())
+
+    @property
+    def available_horizontals(self) -> list[str]:
+        """Horizontal-portfolio names (boolean flag overlays)."""
+        return sorted(self.by_horizontal.keys())

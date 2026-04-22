@@ -8,6 +8,12 @@
 # Source of truth for what a "Lending" upload must look like.
 # ──────────────────────────────────────────────────────────────
 
+from __future__ import annotations
+
+from typing import Callable
+
+import pandas as pd
+
 from .base import FieldSpec, Template
 
 
@@ -125,6 +131,33 @@ class LendingTemplate(Template):
     }
 
     REQUIRED = set(FIELDS.keys())
+
+    # ── Horizontal portfolios (canonical predicate dict) ─────
+    # Single source of truth for "which rows are in horizontal X".
+    # Derived from FIELDS so column name + trigger value are still
+    # declared once (in FIELDS) — this method exposes the same rules
+    # in the {portfolio_name: predicate(df) -> bool_mask} shape that
+    # the cube and slicers consume.
+    #
+    # No slicer, prompt, or registry entry should duplicate these
+    # rules. Adding a horizontal is a one-line FIELDS entry; no
+    # change is needed here.
+    @classmethod
+    def horizontal_definitions(cls) -> dict[str, Callable[[pd.DataFrame], pd.Series]]:
+        result: dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
+        for col, spec in cls.FIELDS.items():
+            if spec.role != "horizontal_flag":
+                continue
+            portfolio = spec.portfolio_name or col
+            trigger = str(spec.trigger_value).strip()
+            # Default-arg capture pins col/trigger per iteration so all
+            # predicates don't end up referencing the loop's last values.
+            def predicate(df, _col=col, _trigger=trigger):
+                if _col not in df.columns:
+                    return pd.Series(False, index=df.index)
+                return df[_col].astype(str).str.strip() == _trigger
+            result[portfolio] = predicate
+        return result
 
 
 # Module-level alias for convenient registration with the classifier.

@@ -26,3 +26,4 @@ __pycache__/
 # Local error log (pipeline/error_log.py JSONL output)
 logs/
 .claude/
+claude.md

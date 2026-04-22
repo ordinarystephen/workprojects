@@ -135,15 +135,15 @@ def static_files(path):
 #         "status":         "active"
 #       },
 #       {
-#         "slug":           "portfolio-level",
-#         "display_name":   "Portfolio-Level Analysis",
+#         "slug":           "industry-portfolio-level",
+#         "display_name":   "Industry Portfolio Analysis",
 #         ...
 #         "parameters":     [
 #           { "name": "portfolio", "type": "enum",
-#             "source": "cube.available_portfolios",
-#             "required": true, "display_label": "Portfolio" }
+#             "source": "cube.available_industries",
+#             "required": true, "display_label": "Industry Portfolio" }
 #         ],
-#         "status":         "placeholder"
+#         "status":         "active"
 #       }
 #     ]
 #   }

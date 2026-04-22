@@ -53,13 +53,13 @@ class TestRegistryLoad(unittest.TestCase):
 
 class TestParameterValidation(unittest.TestCase):
     def test_required_parameter_missing_raises(self):
-        pl = get_mode("portfolio-level")
+        pl = get_mode("industry-portfolio-level")
         self.assertIsNotNone(pl)
         with self.assertRaises(ParameterError):
             validate_parameters(pl, {})
 
     def test_unknown_parameter_raises(self):
-        pl = get_mode("portfolio-level")
+        pl = get_mode("industry-portfolio-level")
         with self.assertRaises(ParameterError):
             validate_parameters(pl, {"portfolio": "X", "garbage": 1})
 
@@ -71,7 +71,7 @@ class TestParameterValidation(unittest.TestCase):
     def test_parameter_value_passes_when_cube_absent(self):
         # Without a cube, enum membership is skipped — only presence /
         # type are enforced. Used by server.py's pre-classify validation.
-        pl = get_mode("portfolio-level")
+        pl = get_mode("industry-portfolio-level")
         cleaned = validate_parameters(pl, {"portfolio": "Manufacturing"}, cube=None)
         self.assertEqual(cleaned, {"portfolio": "Manufacturing"})
 
@@ -87,7 +87,7 @@ class TestPromptLoading(unittest.TestCase):
         self.assertIn("firm-level portfolio snapshot", text)
 
     def test_parameter_substitution(self):
-        pl = get_mode("portfolio-level")
+        pl = get_mode("industry-portfolio-level")
         text = load_prompt(pl, {"portfolio": "Manufacturing"})
         self.assertIn("Manufacturing", text)
         self.assertNotIn("{{portfolio}}", text)
@@ -96,7 +96,7 @@ class TestPromptLoading(unittest.TestCase):
         # Substitution is dumb string replace — missing keys remain
         # in the template. Documented behavior; tests lock it in so
         # future refactors don't silently change semantics.
-        pl = get_mode("portfolio-level")
+        pl = get_mode("industry-portfolio-level")
         text = load_prompt(pl, {})
         self.assertIn("{{portfolio}}", text)
 

@@ -56,50 +56,122 @@ modes:
     prompt_template: portfolio_summary.md
     status: active
 
-  # ── Parameterized modes (placeholders — slicers not yet written) ──
-  # Backend (parameter validation, /cube/parameter-options endpoint)
-  # is fully wired. The slicers themselves are pending — clicking
-  # these in the UI surfaces "mode_not_implemented" until they are.
+  # ── Parameterized portfolio modes ─────────────────────────────
+  # Two distinct portfolio kinds — see docs/future-work.md for the
+  # semantic distinction:
+  #   industry portfolio   — partition of facilities by Risk
+  #                          Assessment Industry (every facility
+  #                          is in exactly one industry)
+  #   horizontal portfolio — boolean overlay (Leveraged Finance,
+  #                          Global Recovery Management) — a
+  #                          facility can be in zero, one, or more
+  #
+  # Parameter sources (`cube.available_industries` /
+  # `cube.available_horizontals`) name the kind explicitly so a
+  # picker can never silently mix the two.
 
-  - slug: portfolio-level
-    display_name: Portfolio-Level Analysis
+  - slug: industry-portfolio-level
+    display_name: Industry Portfolio Analysis
     description: >
-      Detailed analysis of a single portfolio (industry sector),
-      including its KRIs, top contributors, and watchlist entries.
+      Deep-dive on one industry portfolio (the partition of facilities
+      by Risk Assessment Industry). Covers slice-level KRIs, the five-
+      category rating composition within the industry, top parent and
+      facility-level WAPD contributors within the industry, and the
+      industry's share of the firm-level watchlist.
     user_prompt: >
-      Provide a detailed analysis of the {{portfolio}} portfolio.
-      Cover its KRIs, top contributors, and any watchlist entries.
+      Provide a detailed analysis of the {{portfolio}} industry portfolio.
+      Cover its KRIs, rating-category composition (IG / NIG / of-which
+      Distressed / Defaulted / Non-Rated), top contributors, top WAPD
+      drivers, and any watchlist entries within the industry.
     parameters:
       - name: portfolio
         type: enum
-        source: cube.available_portfolios
+        source: cube.available_industries
         required: true
-        display_label: Portfolio
-    cube_slice: portfolio_level
-    prompt_template: portfolio_level.md
-    status: placeholder
+        display_label: Industry Portfolio
+    cube_slice: industry_portfolio_level
+    prompt_template: industry_portfolio_level.md
+    status: active
+
+  - slug: horizontal-portfolio-level
+    display_name: Horizontal Portfolio Analysis
+    description: >
+      Deep-dive on one horizontal portfolio (Leveraged Finance, Global
+      Recovery Management, …). Covers slice-level KRIs, the five-
+      category rating composition within the horizontal, top parent
+      and facility-level WAPD contributors within the horizontal, and
+      the horizontal's share of the firm-level watchlist.
+    user_prompt: >
+      Provide a detailed analysis of the {{portfolio}} horizontal
+      portfolio. Cover its KRIs, rating-category composition (IG / NIG
+      / of-which Distressed / Defaulted / Non-Rated), top contributors,
+      top WAPD drivers, and any watchlist entries within the horizontal.
+    parameters:
+      - name: portfolio
+        type: enum
+        source: cube.available_horizontals
+        required: true
+        display_label: Horizontal Portfolio
+    cube_slice: horizontal_portfolio_level
+    prompt_template: horizontal_portfolio_level.md
+    status: active
+
+  # ── Parameterized placeholders (slicers pending) ──────────────
+  # Backend parameter validation + /cube/parameter-options resolution
+  # is fully wired. The slicers themselves are pending — clicking
+  # these in the UI surfaces "mode_not_implemented" until written.
 
   - slug: portfolio-comparison
-    display_name: Portfolio Comparison
+    display_name: Industry Portfolio Comparison
     description: >
-      Compare two portfolios side by side across KRIs and contributors.
+      Compare two industry portfolios side by side across KRIs and
+      contributors. (For comparing two horizontals or an industry
+      vs a horizontal, see industry-within-horizontal — same engine
+      generalises to both.)
     user_prompt: >
-      Compare the {{portfolio_a}} and {{portfolio_b}} portfolios side
-      by side. Cover KRIs, top contributors, and any divergence in
-      credit quality.
+      Compare the {{portfolio_a}} and {{portfolio_b}} industry portfolios
+      side by side. Cover KRIs, rating-category composition, top
+      contributors, and any divergence in credit quality.
     parameters:
       - name: portfolio_a
         type: enum
-        source: cube.available_portfolios
+        source: cube.available_industries
         required: true
-        display_label: First Portfolio
+        display_label: First Industry Portfolio
       - name: portfolio_b
         type: enum
-        source: cube.available_portfolios
+        source: cube.available_industries
         required: true
-        display_label: Second Portfolio
+        display_label: Second Industry Portfolio
     cube_slice: portfolio_comparison
     prompt_template: portfolio_comparison.md
+    status: placeholder
+
+  - slug: industry-within-horizontal
+    display_name: Industry × Horizontal Cross-Cut
+    description: >
+      Cross-cut analysis: facilities that sit in BOTH an industry
+      partition AND a horizontal overlay (e.g. Tech facilities within
+      Leveraged Finance). See docs/future-work.md for the planned
+      cube extension.
+    user_prompt: >
+      Analyze facilities in the {{industry}} industry that are also
+      flagged into the {{horizontal}} horizontal portfolio. Cover the
+      cross-cut KRIs, rating composition, top contributors, and any
+      divergence from either parent slice.
+    parameters:
+      - name: industry
+        type: enum
+        source: cube.available_industries
+        required: true
+        display_label: Industry
+      - name: horizontal
+        type: enum
+        source: cube.available_horizontals
+        required: true
+        display_label: Horizontal Portfolio
+    cube_slice: industry_within_horizontal
+    prompt_template: industry_within_horizontal.md
     status: placeholder
 
   # ── Placeholder modes (UI button visible, backend not wired) ──
