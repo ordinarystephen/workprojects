@@ -705,6 +705,25 @@ code, .mono { font-family: var(--font-mono); }
   padding: 32px;
 }
 
+.loading-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.inline-notice {
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  background: var(--surface-alt, rgba(0, 0, 0, 0.04));
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.85rem;
+  transition: opacity 300ms ease;
+}
+
+.inline-notice.fade-out { opacity: 0; }
+
 .pipeline {
   display: flex;
   flex-direction: column;
@@ -1444,9 +1463,47 @@ code, .mono { font-family: var(--font-mono); }
 .claim-card {
   background: var(--surface);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
   border-radius: var(--radius);
   padding: 12px 14px;
   animation: fadeSlideIn 0.25s ease both;
+}
+
+.claim-card.claim-verified   { border-left-color: var(--success); }
+.claim-card.claim-mismatch   { border-left-color: var(--danger);  }
+.claim-card.claim-unverified { border-left-color: var(--warning); }
+
+.claim-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.claim-status {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.claim-status-verified   { color: var(--success); background: var(--success-light); }
+.claim-status-mismatch   { color: var(--danger);  background: var(--danger-light);  }
+.claim-status-unverified { color: var(--warning); background: var(--warning-light); }
+
+.claim-status-reason {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.claim-expected {
+  font-size: 0.72rem;
+  color: var(--danger);
+  font-weight: 500;
 }
 
 @keyframes fadeSlideIn {

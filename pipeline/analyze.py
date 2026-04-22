@@ -1,5 +1,5 @@
 # ── KRONOS · pipeline/analyze.py ──────────────────────────────
-# The analysis dispatcher. server.py calls analyze(file, mode) here.
+# The analysis dispatcher. server.py calls analyze(file, mode, parameters).
 #
 # Pipeline (per upload):
 #   1. classifier.classify(file) reads every sheet, matches each to
@@ -7,12 +7,17 @@
 #      typed DataFrames keyed by template name.
 #   2. For each matched template, we compute its cube once. Cubes
 #      are the deterministic JSON the slicers consume.
-#   3. The mode + the cubes drive routing to a slicer/processor
-#      that returns { context, metrics }.
+#   3. The mode + cube + validated parameters drive routing to a
+#      slicer/processor that returns { context, metrics, verifiable_values }.
+#
+# Mode resolution lives in pipeline/registry.py (YAML-driven).
+# Adding a new mode means editing config/modes.yaml and writing a
+# slicer decorated with @register_slicer — no changes here.
 #
 # Falls back to placeholder_processor() for:
-#   - mode == ""             (custom question, no canned button)
-#   - mode not in MODE_MAP   (button visible in UI but processor not wired yet)
+#   - mode == ""               (custom question, no canned button)
+#   - mode is unknown          (slug not in registry)
+#   - mode is a placeholder    (button visible in UI but slicer not wired yet)
 # ──────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -23,67 +28,80 @@ import pandas as pd
 
 from pipeline.cube.lending import compute_lending_cube
 from pipeline.loaders.classifier import classify
-from pipeline.processors.lending import firm_level as lending_firm_level
-from pipeline.processors.lending import portfolio_summary as lending_portfolio_summary
-
-
-# ══════════════════════════════════════════════════════════════
-# ── MODE MAP ──────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════
-#
-# Each entry maps a frontend mode slug to:
-#   - "template": which template's cube the slicer needs.
-#   - "slicer":   callable(cube) -> { context, metrics }.
-#
-# Add new lending modes (concentration-risk, delinquency-trends, ...)
-# alongside firm-level. Add new templates by extending the classifier
-# registry in pipeline/loaders/classifier.py and adding a slicer here.
-#
-MODE_MAP: dict[str, dict] = {
-    "firm-level": {
-        "template": "lending",
-        "slicer":   lending_firm_level.slice_firm_level,
-    },
-    "portfolio-summary": {
-        "template": "lending",
-        "slicer":   lending_portfolio_summary.slice_portfolio_summary,
-    },
-    # "concentration-risk":  { "template": "lending", "slicer": ... },
-    # "delinquency-trends":  { "template": "lending", "slicer": ... },
-    # ...
-}
+from pipeline.registry import (
+    get_mode,
+    get_slicer,
+    validate_parameters,
+)
 
 
 # ══════════════════════════════════════════════════════════════
 # ── DISPATCHER ────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════
 
-def analyze(file_obj, mode: str) -> dict:
+class ModeNotImplementedError(RuntimeError):
+    """Raised when a placeholder mode is invoked. server.py converts
+    this into a 501 with the slug attached."""
+
+    def __init__(self, slug: str):
+        super().__init__(f"Mode '{slug}' is registered but not yet implemented.")
+        self.slug = slug
+
+
+def analyze(file_obj, mode: str, parameters: dict | None = None) -> dict:
     """
     Routes the uploaded file through the appropriate pipeline.
 
     Args:
-        file_obj : file-like object (Flask request.files['file'] or _Base64File)
-        mode     : slug string (e.g. "firm-level"). Empty string for custom prompts.
+        file_obj   : file-like object (Flask request.files['file'] or _Base64File)
+        mode       : slug string (e.g. "firm-level"). Empty string for custom prompts.
+        parameters : dict of mode-specific parameters (validated against the
+                     mode's parameter schema in the registry). May be None /
+                     empty for parameterless modes.
 
     Returns:
-        dict with keys "context" (str) and "metrics" (dict).
+        dict with keys "context" (str), "metrics" (dict), and
+        "verifiable_values" (dict — may be empty for placeholder path).
 
-    Behavior:
-        - Mode in MODE_MAP: classify → compute cube → slice
-        - Mode not in MODE_MAP: fall back to placeholder_processor (reads the
-                                 raw file again and produces a basic summary).
+    Raises:
+        ModeNotImplementedError : mode exists in registry but status != "active"
+        ParameterError          : caller-supplied parameters don't validate
+        ValueError              : workbook missing the required template sheet
     """
-    spec = MODE_MAP.get(mode)
+    parameters = parameters or {}
 
-    if not spec:
+    # ── Step 1: Resolve mode ───────────────────────────────────
+    # Empty mode + unknown slug both fall through to the placeholder
+    # processor. Known-but-not-active modes raise ModeNotImplementedError
+    # so the UI can surface a clear "coming soon" message instead of
+    # silently swallowing the request into the placeholder summary.
+    if not mode:
         return placeholder_processor(file_obj)
 
-    # Classify the workbook. Raises ValueError on missing required columns
-    # or unrecognized sheets — server.py catches and surfaces as a 500.
+    mode_def = get_mode(mode)
+    if mode_def is None:
+        return placeholder_processor(file_obj)
+    if mode_def.status != "active":
+        raise ModeNotImplementedError(mode)
+
+    slicer_entry = get_slicer(mode_def.cube_slice)
+    if slicer_entry is None:
+        # Should be impossible — registry startup validation enforces this.
+        raise RuntimeError(
+            f"Mode '{mode}' points at slicer '{mode_def.cube_slice}' "
+            "which is not registered. (Registry validation should have caught this.)"
+        )
+
+    # ── Step 2: Classify ──────────────────────────────────────
+    # Raises ValueError on missing required columns or unrecognized
+    # sheets — server.py catches and surfaces as a 500.
     classified = classify(file_obj)
 
-    template_name = spec["template"]
+    # The classifier-template-name comes from the slicer module's
+    # location in the pipeline.processors.<template> tree. For now
+    # all slicers are lending; when traded-products lands we'll
+    # surface the template name on the slicer registration itself.
+    template_name = "lending"
     if template_name not in classified["classified"]:
         seen = [s["name"] for s in classified["metadata"]["sheets_seen"]]
         raise ValueError(
@@ -91,14 +109,27 @@ def analyze(file_obj, mode: str) -> dict:
             f"didn't include one. Sheets seen: {seen}."
         )
 
+    # ── Step 3: Compute cube ──────────────────────────────────
     df = classified["classified"][template_name]
+    cube = compute_lending_cube(df)
 
-    if template_name == "lending":
-        cube = compute_lending_cube(df)
-        return spec["slicer"](cube)
+    # ── Step 4: Validate parameters against the cube ──────────
+    # Re-validates here (server.py also validates pre-classify, but
+    # without the cube). The cube-aware pass enforces enum membership
+    # for `source: cube.<field>` parameters.
+    cleaned_params = validate_parameters(mode_def, parameters, cube=cube)
 
-    # Future templates (traded_products, ...) get their compute path here.
-    raise ValueError(f"No cube computer registered for template '{template_name}'.")
+    # ── Step 5: Slice ─────────────────────────────────────────
+    slicer_fn = slicer_entry["fn"]
+    if cleaned_params:
+        result = slicer_fn(cube, **cleaned_params)
+    else:
+        result = slicer_fn(cube)
+
+    # Defensive default — slicers that predate the verifiable_values
+    # contract still return without the key.
+    result.setdefault("verifiable_values", {})
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -107,7 +138,7 @@ def analyze(file_obj, mode: str) -> dict:
 #
 # Fallback that reads any Excel/CSV and returns a basic summary.
 # Used when the user asks a custom question (mode == "") or selects
-# a mode that hasn't been wired into MODE_MAP yet.
+# a slug that isn't in the registry.
 
 def placeholder_processor(file_obj) -> dict:
     file_bytes = file_obj.read()
@@ -192,4 +223,4 @@ def placeholder_processor(file_obj) -> dict:
         if numeric_tiles:
             metrics["Field Averages (Placeholder)"] = numeric_tiles
 
-    return {"context": context, "metrics": metrics}
+    return {"context": context, "metrics": metrics, "verifiable_values": {}}

@@ -62,7 +62,7 @@ from mlflow.types.responses import (
 )
 from pydantic import BaseModel, Field
 
-from pipeline.prompts import get_system_prompt
+from pipeline.registry import get_mode, load_prompt
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +185,12 @@ class State(BaseModel):
     messages: Annotated[list, add_messages]
     context_data: str = ""     # portfolio data string from analyze.py
     mode: str = ""             # mode slug (e.g. "portfolio-summary")
+    parameters: dict = Field(default_factory=dict)
+        # validated mode parameters; substituted into the prompt template
+    prior_narrative: str = ""  # previous narrative text from the same session.
+        # Empty on the first turn; populated on follow-ups so the LLM sees
+        # what it said before. Plain text only — no structured claims or
+        # verification metadata, matching how real prior conversation looks.
     narrative: str = ""        # final narrative text (set by narrate node)
     claims: list = Field(default_factory=list)  # final claims list
 
@@ -267,25 +273,57 @@ Portfolio Data:
 # Both paths return the same State field shape, so downstream
 # (Flask or ResponsesAgent) doesn't care which one ran.
 
-def narrate(state: State, config: RunnableConfig) -> dict:
-    """Sync narrate node — builds the prompt and invokes the LLM."""
+def _build_message_sequence(state: State) -> list:
+    """Assemble the message list passed to the LLM.
 
-    llm = create_llm(config=config)
-    system_prompt = get_system_prompt(state.mode)
+    Shape:
+      system  : mode prompt (parameter-substituted)
+      human   : deterministic context block + the user's question
+      (ai     : prior narrative — only on follow-ups)
+      (human  : the follow-up question)
 
-    # Extract the user question from the most recent human message.
-    # Single-turn today; future multi-turn will still have the newest
-    # ask as the last message (history precedes it).
+    On a first-turn request, state.prior_narrative is empty — we build a
+    single human turn using HUMAN_TEMPLATE (context + question together).
+
+    On follow-ups, we split that apart: the context goes in one human turn,
+    the prior narrative becomes an assistant turn (text only — no structured
+    claims or verification metadata, matching what real prior conversation
+    would look like), and the new question becomes a second human turn.
+
+    OUT-OF-SCOPE BREADCRUMB: a follow-up whose question is truly outside
+    the inherited mode (e.g. firm-level → "how is Health Care doing") is
+    answered from the inherited slice here — degraded quality rather than
+    a reroute. Re-slicing / multi-mode plans belong in a future plan-node
+    layered above this one.
+    """
+    mode_def = get_mode(state.mode) if state.mode else None
+    system_prompt = load_prompt(mode_def, state.parameters)
     user_question = state.messages[-1].content if state.messages else ""
+
+    if state.prior_narrative:
+        context_block = f"Portfolio Data:\n{state.context_data}"
+        return [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=context_block),
+            AIMessage(content=state.prior_narrative),
+            HumanMessage(content=user_question),
+        ]
 
     human_content = HUMAN_TEMPLATE.format(
         user_question=user_question,
         context=state.context_data,
     )
-    messages = [
+    return [
         SystemMessage(content=system_prompt),
         HumanMessage(content=human_content),
     ]
+
+
+def narrate(state: State, config: RunnableConfig) -> dict:
+    """Sync narrate node — builds the prompt and invokes the LLM."""
+
+    llm = create_llm(config=config)
+    messages = _build_message_sequence(state)
 
     # ── Attempt 1: structured output ──────────────────────────
     try:
@@ -316,17 +354,7 @@ async def anarrate(state: State, config: RunnableConfig) -> dict:
     """Async variant — same logic via ainvoke. Required by RunnableCallable."""
 
     llm = create_llm(config=config)
-    system_prompt = get_system_prompt(state.mode)
-
-    user_question = state.messages[-1].content if state.messages else ""
-    human_content = HUMAN_TEMPLATE.format(
-        user_question=user_question,
-        context=state.context_data,
-    )
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=human_content),
-    ]
+    messages = _build_message_sequence(state)
 
     try:
         structured_llm = llm.with_structured_output(NarrativeResponse)
@@ -395,18 +423,31 @@ def _get_graph() -> CompiledStateGraph:
 # server.py calls this. Wraps graph.invoke() with the right
 # State shape and unpacks the result.
 
-def ask_agent(context: str, user_prompt: str, mode: str = "") -> dict:
+def ask_agent(
+    context: str,
+    user_prompt: str,
+    mode: str = "",
+    parameters: dict | None = None,
+    prior_narrative: str = "",
+) -> dict:
     """
     Run the agent graph for a single /upload request.
 
     Args:
-        context     : Portfolio data string from pipeline/analyze.py.
-                      Becomes state.context_data — the data the LLM narrates.
-        user_prompt : The user's question or canned prompt text.
-                      Becomes the HumanMessage content.
-        mode        : Mode slug (e.g. "portfolio-summary"). Selects the
-                      system prompt via pipeline/prompts.get_system_prompt().
-                      Empty string for custom free-form questions.
+        context         : Portfolio data string from pipeline/analyze.py.
+                          Becomes state.context_data — the data the LLM narrates.
+        user_prompt     : The user's question or canned prompt text.
+                          Becomes the HumanMessage content.
+        mode            : Mode slug (e.g. "portfolio-summary"). Resolves to a
+                          prompt template via pipeline/registry.load_prompt.
+                          Empty string for custom free-form questions (uses
+                          config/prompts/default.md).
+        parameters      : Validated mode parameters. Substituted into the
+                          prompt template via simple {{name}} replacement.
+        prior_narrative : Previous narrative from the same session, if any.
+                          When non-empty, the message sequence becomes
+                          system → human(context) → ai(prior_narrative) →
+                          human(user_prompt) — a true multi-turn shape.
 
     Returns:
         dict:
@@ -414,12 +455,23 @@ def ask_agent(context: str, user_prompt: str, mode: str = "") -> dict:
             "claims"    : list — structured claims from the narrative.
                           Each: { sentence, source_field, cited_value }
                           Empty if structured output failed.
+
+    # FUTURE — slice-result caching.
+    # Today every follow-up re-runs the slicer to rebuild `context` and the
+    # matching `verifiable_values`. Cheap (~200–400ms) and trivially correct
+    # since the inputs are the same. If we ever optimize, the cache key would
+    # be (session_id, file_hash, mode, parameters) and the cache entry must
+    # preserve BOTH the slicer context AND verifiable_values side-by-side —
+    # the verifier depends on the latter being identical to what the slicer
+    # produced when context was built. Breadcrumb only, not a TODO.
     """
     graph = _get_graph()
     state_in = {
-        "messages":     [HumanMessage(content=user_prompt)],
-        "context_data": context,
-        "mode":         mode,
+        "messages":        [HumanMessage(content=user_prompt)],
+        "context_data":    context,
+        "mode":            mode,
+        "parameters":      parameters or {},
+        "prior_narrative": prior_narrative or "",
     }
     result = graph.invoke(state_in)
     return {

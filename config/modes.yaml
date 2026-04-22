@@ -1,0 +1,170 @@
+# ── KRONOS · config/modes.yaml ────────────────────────────────
+# Single source of truth for analysis modes.
+#
+# Loaded by pipeline/registry.py at app import. Each entry validated
+# against pipeline.registry.ModeDefinition (extra="forbid"); typos
+# fail the app at startup, not at request time.
+#
+# A mode entry maps to:
+#   - cube_slice: a slicer registered via @register_slicer in
+#                 pipeline/processors/lending/<slug>.py
+#   - prompt_template: a markdown file under config/prompts/
+#   - parameters: an optional list of parameter pickers populated
+#                 either statically (`values:`) or at runtime from
+#                 the cube (`source: cube.<field>`).
+#
+# Parameter substitution in prompts uses simple {{name}} replacement
+# (no Jinja). Example: prompt template references {{portfolio}} →
+# server replaces it with the validated parameter value before the
+# LLM call.
+#
+# To add a new mode, see docs/adding-a-mode.md.
+# ──────────────────────────────────────────────────────────────
+
+modes:
+
+  # ── Active modes ──────────────────────────────────────────────
+
+  - slug: firm-level
+    display_name: Firm-Level View
+    description: >
+      Commitment, outstanding & C&C exposure. High-level view of the
+      entire credit portfolio, including current KRIs and watchlist
+      aggregates.
+    user_prompt: >
+      Provide a firm-level portfolio snapshot. Cover total committed
+      and outstanding exposure, the breadth of parents and industries,
+      and the criticized & classified exposure both in dollars and as
+      a percentage of commitment.
+    parameters: []
+    cube_slice: firm_level
+    prompt_template: firm_level.md
+    status: active
+
+  - slug: portfolio-summary
+    display_name: Portfolio Summary
+    description: >
+      Health overview & key indicators. Executive view of overall
+      portfolio health, including IG/NIG mix, top concentrations,
+      WAPD drivers, and period-over-period movement.
+    user_prompt: >
+      Provide an executive summary of the overall portfolio health.
+      Highlight key risk indicators, credit quality trends, and any
+      areas requiring immediate attention.
+    parameters: []
+    cube_slice: portfolio_summary
+    prompt_template: portfolio_summary.md
+    status: active
+
+  # ── Parameterized modes (placeholders — slicers not yet written) ──
+  # Backend (parameter validation, /cube/parameter-options endpoint)
+  # is fully wired. The slicers themselves are pending — clicking
+  # these in the UI surfaces "mode_not_implemented" until they are.
+
+  - slug: portfolio-level
+    display_name: Portfolio-Level Analysis
+    description: >
+      Detailed analysis of a single portfolio (industry sector),
+      including its KRIs, top contributors, and watchlist entries.
+    user_prompt: >
+      Provide a detailed analysis of the {{portfolio}} portfolio.
+      Cover its KRIs, top contributors, and any watchlist entries.
+    parameters:
+      - name: portfolio
+        type: enum
+        source: cube.available_portfolios
+        required: true
+        display_label: Portfolio
+    cube_slice: portfolio_level
+    prompt_template: portfolio_level.md
+    status: placeholder
+
+  - slug: portfolio-comparison
+    display_name: Portfolio Comparison
+    description: >
+      Compare two portfolios side by side across KRIs and contributors.
+    user_prompt: >
+      Compare the {{portfolio_a}} and {{portfolio_b}} portfolios side
+      by side. Cover KRIs, top contributors, and any divergence in
+      credit quality.
+    parameters:
+      - name: portfolio_a
+        type: enum
+        source: cube.available_portfolios
+        required: true
+        display_label: First Portfolio
+      - name: portfolio_b
+        type: enum
+        source: cube.available_portfolios
+        required: true
+        display_label: Second Portfolio
+    cube_slice: portfolio_comparison
+    prompt_template: portfolio_comparison.md
+    status: placeholder
+
+  # ── Placeholder modes (UI button visible, backend not wired) ──
+  # These render in the canned-prompt grid but return
+  # `{ error: "mode_not_implemented" }` from /upload.
+
+  - slug: concentration-risk
+    display_name: Concentration Risk
+    description: Exposure by segment & sector.
+    user_prompt: >
+      Analyze concentration risk across the portfolio. Identify
+      segments where exposure is elevated, flag any single-name or
+      sector concentrations, and compare against prior periods.
+    parameters: []
+    status: placeholder
+
+  - slug: delinquency-trends
+    display_name: Delinquency Trends
+    description: 30/60/90+ day buckets & drivers.
+    user_prompt: >
+      Deep dive on delinquency trends. What is driving late payments,
+      which vintages or segments show the most stress, and how have
+      the 30/60/90+ day buckets trended?
+    parameters: []
+    status: placeholder
+
+  - slug: risk-segments
+    display_name: Risk Segments
+    description: Highest-risk exposures & outlook.
+    user_prompt: >
+      Identify the highest-risk segments in the portfolio. Explain
+      which metrics are driving elevated risk and what the near-term
+      outlook looks like for those segments.
+    parameters: []
+    status: placeholder
+
+  - slug: exec-briefing
+    display_name: Exec Briefing
+    description: Board-ready summary & action items.
+    user_prompt: >
+      Summarize portfolio performance for an executive audience. Three
+      to five bullet points: headline numbers, trend direction, and one
+      clear action item.
+    parameters: []
+    status: placeholder
+
+  - slug: stress-outlook
+    display_name: Stress Outlook
+    description: Downside scenario & loss capacity.
+    user_prompt: >
+      How would this portfolio perform under a moderate economic stress
+      scenario? Use the current metrics to assess loss absorption
+      capacity and identify the most vulnerable segments.
+    parameters: []
+    status: placeholder
+
+
+# ── Reserved sections ─────────────────────────────────────────
+# Reserved for a future iteration. Synthesis templates compose multiple
+# mode outputs into a single coherent document (e.g., risk assessments
+# spanning lending + traded products + firm-level). Not implemented in
+# this refactor.
+syntheses: []
+
+# Reserved for a future iteration. Length directives modify synthesis
+# output length (full report, executive briefing, quick update). Not
+# implemented in this refactor.
+lengths: []

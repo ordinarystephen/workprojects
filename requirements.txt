@@ -13,6 +13,10 @@ flask
 pandas
 openpyxl          # required by pandas to read .xlsx files
 
+# ── YAML config ───────────────────────────────────────────────
+# Loads config/modes.yaml at startup (mode registry).
+pyyaml
+
 # ── LangChain + LangGraph + Azure OpenAI ──────────────────────
 # Pinned to the versions in the AICE LangGraph cookbook.
 # Do not upgrade any of these four together — they are tested

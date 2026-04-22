@@ -30,6 +30,9 @@
     <div class="input-panel" id="inputPanel">
       <div class="card unified-card">
 
+        <!-- Transient inline notice (e.g. "Analysis cancelled.") -->
+        <div class="inline-notice" id="inlineNotice" role="status" hidden></div>
+
         <!-- Quick Analysis -->
         <div class="prompt-section-label">Quick analysis</div>
         <div class="canned-grid" id="cannedGrid">
@@ -104,6 +107,9 @@
 
     <!-- ── Loading ───────────────────────────────────────────────── -->
     <div class="loading-panel" id="loadingPanel" hidden>
+      <div class="loading-header">
+        <button type="button" class="btn btn-ghost btn-sm" id="cancelBtn">Cancel</button>
+      </div>
       <div class="pipeline">
         <div class="pipeline-step" id="step-0">
           <div class="step-dot"></div>

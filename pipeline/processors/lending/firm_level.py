@@ -7,15 +7,27 @@
 # only picks WHICH parts of it to send to the LLM and which to
 # render as Data Snapshot tiles.
 #
-# Contract (matches SCRIPT_MAP convention in pipeline/analyze.py):
-#   slice(cube) -> { "context": str, "metrics": dict }
+# Contract (matches MODE_MAP convention in pipeline/analyze.py):
+#   slice(cube) -> {
+#     "context": str,               # prose the LLM sees
+#     "metrics": dict,              # Data Snapshot tiles
+#     "verifiable_values": dict,    # label → { value, type } that backs the verifier
+#   }
+#
+# The verifiable_values keys are the English labels that appear verbatim
+# in the context. The LLM is prompted to cite those labels in claim
+# source_field fields; pipeline/validate.py resolves each claim against
+# this dict. If a figure is computed inline (sums of multiple fields),
+# it is intentionally omitted — the LLM should mark those as "calculated".
 # ──────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
 from pipeline.cube.models import LendingCube
+from pipeline.registry import register_slicer
 
 
+@register_slicer("firm_level")
 def slice_firm_level(cube: LendingCube) -> dict:
     """
     Build the firm-level view: prose context for the LLM plus tile
@@ -25,7 +37,8 @@ def slice_firm_level(cube: LendingCube) -> dict:
         cube: a fully-computed LendingCube.
 
     Returns:
-        dict with keys "context" (str) and "metrics" (dict).
+        dict with keys "context" (str), "metrics" (dict), and
+        "verifiable_values" (dict).
     """
     current = cube.firm_level.current
     totals  = current.totals
@@ -171,7 +184,74 @@ def slice_firm_level(cube: LendingCube) -> dict:
              "sentiment": "warning"},
         ]
 
-    return {"context": context, "metrics": metrics}
+    # ── verifiable_values ─────────────────────────────────────
+    # Labels must exactly match the English labels that appear in the
+    # context above. The LLM cites these labels back via claim.source_field
+    # and pipeline/validate.verify_claims resolves them here.
+    verifiable_values: dict = {
+        "Distinct ultimate parents":           {"value": counts.parents,    "type": "count"},
+        "Distinct partners":                   {"value": counts.partners,   "type": "count"},
+        "Distinct facilities":                 {"value": counts.facilities, "type": "count"},
+        "Distinct risk assessment industries": {"value": counts.industries, "type": "count"},
+
+        "Committed Exposure":    {"value": totals.committed,       "type": "currency"},
+        "Outstanding Exposure":  {"value": totals.outstanding,     "type": "currency"},
+        "Take & Hold Exposure":  {"value": totals.take_and_hold,   "type": "currency"},
+        "Temporary Exposure":    {"value": totals.temporary,       "type": "currency"},
+        "Approved Limit":        {"value": totals.approved_limit,  "type": "currency"},
+
+        "Pass":                  {"value": totals.pass_rated,           "type": "currency"},
+        "Special Mention":       {"value": totals.special_mention,      "type": "currency"},
+        "Substandard":           {"value": totals.substandard,          "type": "currency"},
+        "Doubtful":              {"value": totals.doubtful,             "type": "currency"},
+        "Loss":                  {"value": totals.loss,                 "type": "currency"},
+        "No Regulatory Rating":  {"value": totals.no_regulatory_rating, "type": "currency"},
+        "Criticized & Classified (SM + SS + Dbt + L)": {
+            "value": totals.criticized_classified, "type": "currency"
+        },
+    }
+    if totals.cc_pct_of_commitment is not None:
+        verifiable_values["C&C as % of commitment"] = {
+            "value": totals.cc_pct_of_commitment, "type": "percentage",
+        }
+    if wapd.display:
+        verifiable_values["Weighted Average PD"] = {
+            "value": wapd.display, "type": "string",
+        }
+    if walgd.display:
+        verifiable_values["Weighted Average LGD"] = {
+            "value": walgd.display, "type": "string",
+        }
+
+    # IG/NIG split — one entry per label.
+    for label, hist in cube.by_ig_status.items():
+        verifiable_values[label] = {
+            "value": hist.current.totals.committed, "type": "currency",
+        }
+
+    # Horizontal portfolios — committed figure keyed by portfolio name.
+    for name, hist in cube.by_horizontal.items():
+        verifiable_values[name] = {
+            "value": hist.current.totals.committed, "type": "currency",
+        }
+
+    # Watchlist firm-level aggregate.
+    if cube.watchlist.facility_count > 0 or cube.watchlist.committed > 0:
+        verifiable_values["Watchlist facility count"] = {
+            "value": cube.watchlist.facility_count, "type": "count",
+        }
+        verifiable_values["Watchlist committed exposure"] = {
+            "value": cube.watchlist.committed, "type": "currency",
+        }
+
+    # Period metadata.
+    verifiable_values["as of"] = {"value": as_of, "type": "date"}
+
+    return {
+        "context": context,
+        "metrics": metrics,
+        "verifiable_values": verifiable_values,
+    }
 
 
 # ── helpers ───────────────────────────────────────────────────

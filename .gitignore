@@ -22,3 +22,6 @@ __pycache__/
 
 # Claude local settings (contains permissions, not meant for shared repo)
 .claude/settings.local.json
+
+# Local error log (pipeline/error_log.py JSONL output)
+logs/

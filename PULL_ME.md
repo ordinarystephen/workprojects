@@ -208,3 +208,88 @@ Adds a deterministic answer to "which loans are pulling the WAPD up the most?". 
 **Behavior change:** Portfolio Summary now produces a deterministic top-WAPD-contributors list and a new tile section. The LLM narrative will reference the loans driving the WAPD up. The per-horizontal map (`wapd_contributors_by_horizontal`) is computed and stored in the cube but not yet rendered in any slicer — available for future per-portfolio narration.
 
 **Compatibility:** purely additive on the cube. Existing slicers (firm-level) continue to work unchanged because they don't read the new fields.
+
+---
+
+## Round 11 — FAB/follow-up bug fixes, Cancel button, follow-up inheritance, error logging
+
+Commit: _see `git log` on branch `kronos`_
+
+Four-part pass from a state-machine audit of the FAB + follow-up flow. Parts A–C tighten the follow-up loop; Part D introduces an always-on error log that runs alongside (and independently of) MLflow tracking.
+
+### Part A — FAB/follow-up bug fixes
+
+- [ ] `static/main.js` — `abortFollowup()` now removes `followupFab.classList.remove('open')` so a mid-draft cancel doesn't leave a stale `.open` class on the next open. `flashEmpty(textarea)` strips any sibling `.followup-error` row (stale error banners no longer survive through a shake). Added Esc keydown handler that closes the FAB like clicking `×`. `submitFollowup()` guards `!selectedFile` at the top and routes to `showFollowupError()` with a neutral "start a new analysis" message instead of silently throwing.
+
+### Part B — Cancel button on the analysis transition screen
+
+- [ ] `static/index.html` — added `<button id="cancelBtn">Cancel</button>` in a `.loading-header` row at the top of `#loadingPanel`, and `<div id="inlineNotice" class="inline-notice" role="status" hidden>` inside the unified card.
+- [ ] `static/styles.css` — added `.loading-header` (flex-end) and `.inline-notice` (neutral surface-alt background, 300ms fade-out via `.fade-out`).
+- [ ] `static/main.js` — module-level `primaryController` (AbortController) + `primaryCancelled` sticky flag. `runAnalysis()` arms the controller synchronously before kicking off `fileToBase64` + fetch, threads `signal`, catches `AbortError` → returns a `{ __aborted: true }` sentinel, and short-circuits after fetch so a cancel during post-fetch animation is still honored before `showResults()`. Cancel button aborts, routes immediately back to the upload card (no loading dismissal animation), and triggers a 3-second `.inline-notice` with 300ms fade. `abortPrimary()` + `showInlineNotice()` helpers added. All user state (file, mode, parameters, prompt text) preserved through a cancel — `runAnalysis()` doesn't mutate any of it on the happy path, so preservation was free.
+
+### Part C — Follow-up mode/parameter inheritance + sort-determinism audit
+
+- [ ] `static/main.js` — module-level `inheritedMode`, `inheritedParameters`, `lastNarrative`. `showResults()` snapshots all three on first render. Follow-up POST body now sends `{ mode: inheritedMode, parameters: inheritedParameters, prior_narrative: lastNarrative }` so the slicer re-runs against the same inputs and the verifier compares against identical `verifiable_values`. `lastNarrative` is advanced after each follow-up renders; the New Analysis button clears all three.
+- [ ] `server.py` — extracts `prior_narrative` from both JSON and multipart branches and threads it into `ask_agent(..., prior_narrative=prior_narrative)`.
+- [ ] `pipeline/agent.py` — new `State.prior_narrative: str = ""` field; extracted `_build_message_sequence(state)` helper that emits a multi-turn shape `[System, Human(context), AI(prior_narrative), Human(question)]` when `prior_narrative` is set, else the first-turn shape via `HUMAN_TEMPLATE`. Assistant turn carries **plain narrative text only** — no structured claims or verification metadata, matching what a real prior conversation would look like. `ask_agent()` accepts a `prior_narrative=""` kwarg. Added FUTURE cache breadcrumb (file-hash keying; cache entry must preserve both slicer context AND verifiable_values) and an OUT-OF-SCOPE breadcrumb noting that follow-ups genuinely outside the inherited slice are answered with degraded quality, not rerouted (re-slicing belongs in a future plan-node).
+- [ ] `pipeline/cube/lending.py` — sort-determinism audit:
+  - `_top_contributors`: `grouped.sort_values([<metric>, "Ultimate Parent Code"], ascending=[False, True])` for each of by_committed / by_outstanding / by_wapd_contribution / by_cc_exposure.
+  - `_top_wapd_facility_contributors`: `sort_values(["wapd_numerator", "Facility ID"], ascending=[False, True]).head(n)`.
+  - `_facility_changes`: `out.sort(key=lambda c: (-c.committed, c.facility_id))`.
+  - `_exposure_movers`: now `reset_index() + sort_values(["abs_delta", "Facility ID"], ascending=[False, True])` — explicit secondary key instead of relying on groupby's default sort + stable mergesort.
+- [ ] `pipeline/processors/lending/portfolio_summary.py` — `_top_groupings`: `pairs.sort(key=lambda kv: (-kv[1], kv[0]))`.
+- [ ] `pipeline/parsers/regulatory_rating.py` — `_normalize`: `sorted(merged.items(), key=lambda kv: (_INDEX.get(kv[0], 999), kv[0]))`.
+
+### Part D — Error logging scaffolding
+
+- [ ] `pipeline/error_log.py` — **NEW FILE.** Two-tier emission via `log_error(event_type, **fields)`:
+  - Tier 1 (JSONL, always on): appends to `<KRONOS_ERROR_LOG_DIR>/kronos-errors.jsonl` (default `logs/`), rotates on ≥10 MB OR date change, thread-safe via module-level `threading.Lock()`, date-dated archive filenames.
+  - Tier 2 (MLflow, gated by `KRONOS_MLFLOW_ENABLED` + active run): adds `kronos.has_error=true` tag, increments `kronos_error_<event_type>_count` metric, logs full record as `kronos-error-<ts>.json` artifact.
+  - `read_recent(limit=50)` returns the JSONL tail (cap 500) for the `/errors/recent` endpoint.
+  - Field policy: bounded snippets (context ≤500, user_prompt ≤250); never logs full narratives / full file contents / verifiable_values.
+  - All writes are best-effort — a logging failure never raises.
+- [ ] `server.py` — instrumented failure sites in `/upload` and `/cube/parameter-options`:
+  - `upload_parse_failed` (base64 decode, parameters JSON parse)
+  - `parameter_validation_failed` (pre-validate + cube-aware)
+  - `mode_not_implemented`
+  - `classification_failed` (ValueError from analyze, missing lending sheet in /cube/parameter-options)
+  - `slicer_failed` (generic analyze exception)
+  - `llm_failed` (ask_agent exception, with context_snippet + prior-narrative flag)
+  - `verification_mismatch` (only when `mismatch_count > 0`; captures up to 10 offending claim rows — field_not_found "unverified" is transparency, not an error, and is NOT logged)
+  - `cube_parameter_options_failed`
+  - New `GET /errors/recent?limit=N` route gated by `KRONOS_ERRORS_ENDPOINT_ENABLED` — returns 404 when disabled.
+  - New `_session_id()` helper reads `X-Kronos-Session` header (capped at 64 chars).
+- [ ] `static/main.js` — new `KRONOS_SESSION_HEADER` constant + `getSessionId()` helper. Generates a per-tab UUID via `crypto.randomUUID()` (with hex-token fallback) on first call, persists in `sessionStorage` under `kronos.session_id`. Header added to `/modes`, primary `/upload`, and follow-up `/upload` fetches. Falls back to a `window.__kronosSessionId` if `sessionStorage` is unavailable (private mode / sandbox).
+- [ ] `claude.md` — new "## Error Logging Layer" section under the MLflow section (entry point, tiers, event types, field policy, session ID, endpoint, env vars).
+
+### New environment variables
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KRONOS_ERROR_LOG_DIR` | `logs/` | Directory for the JSONL file. **TODO — confirm Domino persistent path** (`/domino/datasets/...` conventionally, but verify per-deployment before pinning; setter can override at deploy time without code change). |
+| `KRONOS_ERRORS_ENDPOINT_ENABLED` | unset (off) | Set to `true` to enable `GET /errors/recent`. |
+
+### Compatibility / rollout
+
+- Purely additive on the backend: existing routes unchanged, new route is 404 when its env var is unset.
+- Follow-up inheritance is additive on the wire — old clients that don't send `prior_narrative` still work (server reads `""`).
+- Sort-audit changes produce identical ordering when values tie; differ from previous behavior only when the old code's ordering was already non-deterministic (i.e. fixing a latent flake, not altering a stable result).
+- JSONL file appears at `logs/kronos-errors.jsonl` the first time an error is logged. Add `logs/` to `.gitignore` if it isn't already.
+
+---
+
+## Round 12 — Deterministic calculation audit
+
+Commit: _see `git log` on branch `kronos`_
+
+Read-only audit of every calculation in `pipeline/cube/lending.py` and what each slicer surfaces. No code changed. Output is a single reference doc that scopes follow-up work.
+
+- [ ] `docs/calculation-audit.md` — **NEW FILE.** Ten sections: cube overview, section inventory, KRI inventory matrix (per slicer), sub-statistics audit (GRM / Leveraged Finance / Watchlist), horizontal-portfolio deep dive (incl. industry × horizontal feasibility), cross-section consistency invariants, determinism audit (explicit vs implicit tiebreakers), correctness spot-checks, 19 ranked gaps, 10 scoped recommendations.
+
+**Headline findings (do not fix yet):**
+- HIGH: IG/NIG silently misclassifies unrated PD codes as NIG (`~is_ig` mask catches blanks/NaN/out-of-scale).
+- HIGH: `by_industry` / `by_segment` / `by_branch` don't reconcile with firm totals when dim values are NaN — rows drop from every bucket but still contribute to the firm sum.
+- HIGH: "Portfolio" semantics ambiguous — `cube.available_portfolios` maps to industries, but the `portfolio-level` / `portfolio-comparison` placeholder modes read like they mean horizontals.
+- MEDIUM cluster: dormant cube outputs (`by_segment`, `by_branch`, `wapd_contributors_by_horizontal`, `top_exposure_movers`, three of four `top_contributors.by_*` lists, `GroupingHistory.history`) computed but unused by any slicer.
+
+**Behavior change:** none — audit-only.

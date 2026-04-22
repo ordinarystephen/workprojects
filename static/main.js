@@ -29,6 +29,40 @@
 const USE_MOCK_RESULTS = false;
 
 
+// ── Session ID ────────────────────────────────────────────────
+// Per-tab UUID generated once and stored in sessionStorage. Sent on
+// every fetch as X-Kronos-Session so server-side error records can
+// be correlated across an upload + its follow-ups. Not auth, not
+// identity — pure correlation for triage.
+const KRONOS_SESSION_HEADER = 'X-Kronos-Session';
+
+function getSessionId() {
+  try {
+    let sid = sessionStorage.getItem('kronos.session_id');
+    if (!sid) {
+      // crypto.randomUUID() is available in all modern browsers; fall
+      // back to a timestamp+random hex for ancient ones so we still
+      // produce a traceable token rather than sending nothing.
+      sid = (crypto && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+      sessionStorage.setItem('kronos.session_id', sid);
+    }
+    return sid;
+  } catch {
+    // sessionStorage disabled (private mode, some sandboxes). Fall back
+    // to a per-page-load token — correlation across follow-ups in the
+    // same page survives, it just won't match across reloads.
+    if (!window.__kronosSessionId) {
+      window.__kronosSessionId = (crypto && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+    }
+    return window.__kronosSessionId;
+  }
+}
+
+
 // ── DOM refs ──────────────────────────────────────────────────
 // Handles to every element this script interacts with.
 // These IDs are defined in index.html — do not rename without updating both.
@@ -59,6 +93,8 @@ const metricGrid      = document.getElementById('metricGrid');      // data snap
 const resultsTimestamp= document.getElementById('resultsTimestamp');// timestamp in results header
 const messageThread   = document.getElementById('messageThread');   // thread container (first + follow-up blocks)
 const followupFab     = document.getElementById('followupFab');     // floating + button
+const cancelBtn       = document.getElementById('cancelBtn');        // Cancel button on transition screen
+const inlineNotice    = document.getElementById('inlineNotice');     // transient notice on input panel
 
 
 // ── State ─────────────────────────────────────────────────────
@@ -68,9 +104,12 @@ const followupFab     = document.getElementById('followupFab');     // floating 
 
 let selectedFile    = null;  // File object from the last attach action
 let activeCannedBtn = null;  // Currently selected quick-analysis button element
-let activeMode      = null;  // Mode slug from prompts.json (e.g. "lending-risk").
-                             // Sent to server as formData 'mode' to route the correct
-                             // pipeline script. Null when user types a custom question.
+let activeMode      = null;  // Mode slug from /modes (e.g. "firm-level").
+                             // Sent to server as 'mode' on /upload to route the
+                             // correct slicer. Null for custom free-form questions.
+let activeParameters = {};   // Validated parameter values for the active mode.
+                             // Populated by the (future) parameter picker UI for
+                             // parameterized modes. Sent to /upload as 'parameters'.
 
 // Follow-up request lifecycle. Module-level so unrelated handlers
 // ("New Analysis", runAnalysis reset) can abort an in-flight request
@@ -78,6 +117,24 @@ let activeMode      = null;  // Mode slug from prompts.json (e.g. "lending-risk"
 let followupController = null;  // AbortController for the current /upload fetch
 let followupInFlight   = false; // true between submit start and resolve/error
 const FOLLOWUP_TIMEOUT_MS = 60_000;
+
+// Primary (first-pass) /upload lifecycle. Mirrors the follow-up guards
+// so the Cancel button on the transition screen can abort cleanly.
+// primaryCancelled is a sticky flag read after each await boundary in
+// runAnalysis — the cancel handler transitions the UI itself, so runAnalysis
+// just needs to short-circuit before rendering stale results.
+let primaryController = null;
+let primaryCancelled  = false;
+
+// Session state preserved across follow-ups. inheritedMode /
+// inheritedParameters snapshot what the first-pass ran with, so a
+// follow-up on the same thread re-runs the same slicer and the verifier
+// checks against identical verifiable_values. lastNarrative is the plain
+// text of the most recent narrative — fed back to the LLM as a prior AI
+// turn on follow-ups (plain text only, no claims or verification metadata).
+let inheritedMode       = '';
+let inheritedParameters = {};
+let lastNarrative       = '';
 
 
 // ── Upload ────────────────────────────────────────────────────
@@ -188,12 +245,13 @@ function showInlineError(msg) {
 
 
 // ── Canned Prompts ────────────────────────────────────────────
-// Buttons are rendered dynamically from static/prompts.json.
-// To add, remove, or edit a button — only touch prompts.json.
-// Each entry requires: title, desc, mode, prompt.
+// Buttons are rendered dynamically from GET /modes — the YAML-driven
+// registry in config/modes.yaml is the source of truth. To add,
+// remove, or rename a button, edit config/modes.yaml. The frontend
+// has no hard-coded knowledge of which modes exist.
 //
-// TODO (naming): If you rename the mode slugs in prompts.json,
-// make sure SCRIPT_MAP keys in pipeline/analyze.py match exactly.
+// Modes carry a `status` flag; placeholders render in a muted style
+// and surface a clear "coming soon" message on click.
 
 function attachCannedHandler(btn) {
   btn.addEventListener('click', () => {
@@ -202,7 +260,8 @@ function attachCannedHandler(btn) {
     // Clicking the already-active button deselects it
     if (activeCannedBtn === btn) {
       activeCannedBtn = null;
-      activeMode = null; // no script to route to
+      activeMode = null;
+      activeParameters = {};
       customPrompt.value = '';
       promptHint.textContent = '';
       updateRunBtn();
@@ -210,31 +269,51 @@ function attachCannedHandler(btn) {
     }
 
     activeCannedBtn = btn;
-    activeMode = btn.dataset.mode || null; // slug that routes to the correct pipeline script server-side
+    activeMode = btn.dataset.mode || null;
+    activeParameters = {};   // cleared on every mode change; future
+                             // parameter picker writes back here
     btn.classList.add('active');
-    customPrompt.value = btn.dataset.prompt; // pre-fill textarea with the canned prompt text
-    promptHint.textContent = btn.querySelector('.canned-title').textContent; // show title as hint
+    customPrompt.value = btn.dataset.prompt;
+    promptHint.textContent = btn.querySelector('.canned-title').textContent;
     updateRunBtn();
     customPrompt.focus();
   });
 }
 
-// Fetch prompts.json and build the button grid on page load
-fetch('prompts.json')
+// Fetch /modes and build the button grid on page load
+fetch(new URL('modes', document.baseURI).href, {
+  headers: { [KRONOS_SESSION_HEADER]: getSessionId() },
+})
   .then(r => r.json())
-  .then(prompts => {
-    prompts.forEach(p => {
+  .then(({ modes }) => {
+    if (!Array.isArray(modes)) {
+      console.warn('[KRONOS] /modes returned no modes array', modes);
+      return;
+    }
+    modes.forEach(m => {
       const btn = document.createElement('button');
       btn.className = 'canned-btn';
-      btn.dataset.prompt = p.prompt;           // full prompt text pre-fills textarea on click
-      btn.dataset.mode   = p.mode || '';       // mode slug stored on element, read on click
-      btn.innerHTML = `<span class="canned-title">${p.title}</span><span class="canned-desc">${p.desc}</span>`;
+      if (m.status === 'placeholder') btn.classList.add('placeholder');
+      btn.dataset.prompt = m.user_prompt || '';
+      btn.dataset.mode   = m.slug || '';
+      btn.dataset.status = m.status || '';
+      // The parameter list is JSON-stringified onto the element so the
+      // future picker UI can read it without a second registry lookup.
+      btn.dataset.parameters = JSON.stringify(m.parameters || []);
+      btn.innerHTML =
+        `<span class="canned-title">${m.display_name}</span>` +
+        `<span class="canned-desc">${m.description || ''}</span>`;
+      if (m.status === 'placeholder') {
+        btn.title = 'Placeholder mode — backend not wired yet.';
+      }
       cannedGrid.appendChild(btn);
       attachCannedHandler(btn);
     });
   })
-  .catch(() => {
-    // prompts.json unavailable — grid stays empty, user can still type a custom question
+  .catch(err => {
+    // /modes unavailable — grid stays empty, user can still type a
+    // custom question against the default prompt.
+    console.warn('[KRONOS] /modes fetch failed; canned grid empty', err);
   });
 
 // If the user starts typing, deselect any active canned button.
@@ -244,6 +323,7 @@ customPrompt.addEventListener('input', () => {
     activeCannedBtn.classList.remove('active');
     activeCannedBtn = null;
     activeMode = null; // custom question has no associated pipeline script
+    activeParameters = {};
     promptHint.textContent = '';
   }
   // Auto-grow textarea height with content
@@ -276,6 +356,49 @@ function updateRunBtn() {
 runBtn.addEventListener('click', runAnalysis);
 
 
+// ── Cancel (primary analysis) ─────────────────────────────────
+// Visible on the transition screen for the entire duration of the
+// analysis. On click, aborts the in-flight fetch and returns the user
+// to the input panel with all of their state intact: attached file,
+// selected mode, parameter values, and the prompt textarea content all
+// persist (none of those are cleared by runAnalysis). A transient
+// neutral notice confirms the cancellation.
+function abortPrimary(reason = 'user-cancel') {
+  primaryCancelled = true;
+  if (primaryController) {
+    try { primaryController.abort(reason); } catch { /* no-op */ }
+    primaryController = null;
+  }
+}
+
+function showInlineNotice(message, visibleMs = 3000, fadeMs = 300) {
+  if (!inlineNotice) return;
+  inlineNotice.textContent = message;
+  inlineNotice.classList.remove('fade-out');
+  inlineNotice.hidden = false;
+  setTimeout(() => {
+    inlineNotice.classList.add('fade-out');
+    setTimeout(() => {
+      inlineNotice.hidden = true;
+      inlineNotice.classList.remove('fade-out');
+      inlineNotice.textContent = '';
+    }, fadeMs);
+  }, visibleMs);
+}
+
+if (cancelBtn) {
+  cancelBtn.addEventListener('click', () => {
+    abortPrimary('user-cancel');
+    loadingPanel.hidden = true;
+    inputPanel.hidden = false;
+    inputPanel.classList.remove('fade-in');
+    void inputPanel.offsetWidth; // reflow to restart fade-in
+    inputPanel.classList.add('fade-in');
+    showInlineNotice('Analysis cancelled.');
+  });
+}
+
+
 // ── Pipeline ──────────────────────────────────────────────────
 // Orchestrates the loading animation and the API call.
 // Steps 0–2 animate on fixed delays (UI timing only, not real durations).
@@ -301,6 +424,13 @@ const STEP_DELAYS = [150, 250, 100, 0, 150];
 async function runAnalysis() {
   const prompt = customPrompt.value.trim();
   if (!selectedFile || !prompt) return;
+
+  // Reset cancellation state for this run. Arm the AbortController so the
+  // Cancel button can abort the fetch; armed synchronously (before any await)
+  // so a very-early cancel click still finds a live controller.
+  primaryCancelled = false;
+  primaryController = new AbortController();
+  const primarySignal = primaryController.signal;
 
   // Switch to loading view
   inputPanel.hidden  = true;
@@ -345,16 +475,28 @@ async function runAnalysis() {
   const apiCall = USE_MOCK_RESULTS
     ? Promise.resolve(null)
     : fileToBase64(selectedFile)
-        .then(file_b64 => fetch(uploadUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            file_name: selectedFile.name,
-            file_b64,
-            prompt,
-            mode: activeMode || '',
-          }),
-        }))
+        .then(file_b64 => {
+          // fileToBase64 doesn't honor signal — re-check before the fetch
+          // so a user-cancel during base64 encoding still bails cleanly.
+          if (primarySignal.aborted) {
+            throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+          }
+          return fetch(uploadUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              [KRONOS_SESSION_HEADER]: getSessionId(),
+            },
+            body: JSON.stringify({
+              file_name: selectedFile.name,
+              file_b64,
+              prompt,
+              mode: activeMode || '',
+              parameters: activeParameters || {},
+            }),
+            signal: primarySignal,
+          });
+        })
         .then(async r => {
           console.log('[KRONOS] /upload response received', {
             status: r.status,
@@ -373,6 +515,11 @@ async function runAnalysis() {
           return data;
         })
         .catch(err => {
+          if (err?.name === 'AbortError') {
+            // Cancel handler has already transitioned the UI. Return a
+            // sentinel so runAnalysis can short-circuit before showResults.
+            return { __aborted: true };
+          }
           console.error('[KRONOS] /upload fetch failed (network/CORS/proxy)', err);
           return { __error: `Network error — could not reach the server. (${err?.message || err})` };
         });
@@ -393,6 +540,15 @@ async function runAnalysis() {
   const step3 = document.getElementById('step-3');
   step3.classList.add('active');
   const apiResult = await apiCall;
+
+  // User-cancel during any stage: the cancel handler already hid the
+  // loading panel and restored the input panel with its state intact.
+  // Don't proceed into step 4 / showResults — just exit cleanly.
+  if (primaryCancelled || apiResult?.__aborted) {
+    primaryController = null;
+    return;
+  }
+
   const t3 = ((Date.now() - t0) / 1000).toFixed(1);
   step3.classList.remove('active');
   step3.classList.add('done');
@@ -441,6 +597,7 @@ async function runAnalysis() {
   } else {
     result = apiResult;
   }
+  primaryController = null;
   showResults(result, t4);
 }
 
@@ -501,6 +658,13 @@ function showResults(result, elapsed) {
   const contextSent  = result.context_sent || null;
   const verification = result.verification || null;
 
+  // Snapshot the mode + parameters the first-pass ran with. Follow-ups
+  // on this thread inherit both so the slicer re-runs identically and
+  // the verifier checks against the same verifiable_values.
+  inheritedMode       = activeMode || '';
+  inheritedParameters = { ...(activeParameters || {}) };
+  lastNarrative       = narrative;
+
   // Inject tab bar above the narrative (Analysis | Claims).
   // Only shows the Claims tab if the LLM returned structured claims.
   buildNarrativeTabs(firstBlock, claims.length > 0);
@@ -509,7 +673,7 @@ function showResults(result, elapsed) {
 
   // Render the Claims panel (hidden behind the tab — toggle via tab bar).
   // Empty if structured output fell back to plain text.
-  renderClaimsPanel(firstBlock, claims);
+  renderClaimsPanel(firstBlock, claims, verification);
 
   // Add verification badge to the message-meta line already in the DOM.
   if (verification && verification.total > 0) {
@@ -520,6 +684,7 @@ function showResults(result, elapsed) {
   if (contextSent) renderDataUsedPanel(firstBlock, contextSent);
 
   addCopyButton(firstBlock, narrative);
+  followupFab.classList.remove('open'); // ensure the FAB starts as +, not ×
   followupFab.hidden = false; // show the follow-up FAB
 }
 
@@ -571,11 +736,11 @@ function buildNarrativeTabs(block, hasClaims) {
 
 
 // ── Claims Panel ──────────────────────────────────────────────
-// Renders a card for each structured claim returned by the LLM.
+// Renders a card for each structured claim returned by the LLM,
+// with a per-claim verification badge (verified / unverified / mismatch).
 // Inserted after #narrativeText, hidden by default (shown via tab click).
-// Each card shows: the cited sentence, source field, and cited value.
 
-function renderClaimsPanel(block, claims) {
+function renderClaimsPanel(block, claims, verification) {
   // Remove any existing claims panel
   block.querySelector('.claims-panel')?.remove();
 
@@ -594,58 +759,127 @@ function renderClaimsPanel(block, claims) {
     }
   }
 
+  // Per-claim verification results from the server, keyed by index.
+  // claim_results[i] = { claim_index, status, reason, expected, actual }.
+  const claimResults = (verification && Array.isArray(verification.claim_results))
+    ? verification.claim_results
+    : [];
+  const resultByIndex = Object.create(null);
+  claimResults.forEach(r => { resultByIndex[r.claim_index] = r; });
+
   if (claims.length === 0) {
-    // Structured output fell back — show a helpful note
     const empty = document.createElement('div');
     empty.className = 'claims-empty';
     empty.textContent = 'Structured claims are not available for this response. The LLM returned plain text output.';
     panel.appendChild(empty);
   } else {
     claims.forEach((claim, i) => {
+      const r = resultByIndex[i];
+      const status = r?.status || 'unverified';
       const card = document.createElement('div');
-      card.className = 'claim-card';
+      card.className = 'claim-card claim-' + status;
       card.style.animationDelay = `${i * 40}ms`;
+
+      // Tooltip explains expected vs actual on hover, and the reason code.
+      const reason = r?.reason ? ` (${r.reason})` : '';
+      const expected = r?.expected ? `\nExpected: ${r.expected}` : '';
+      const actual = r?.actual ? `\nCited: ${r.actual}` : '';
+      const tip = `Status: ${status}${reason}${expected}${actual}`;
+
       card.innerHTML = `
+        <div class="claim-header">
+          <span class="claim-status claim-status-${status}" title="${escapeHtml(tip)}">${statusLabel(status)}</span>
+          <span class="claim-status-reason" title="${escapeHtml(tip)}">${r?.reason ? escapeHtml(r.reason) : ''}</span>
+        </div>
         <div class="claim-sentence">"${escapeHtml(claim.sentence)}"</div>
         <div class="claim-meta">
           <span class="claim-source-label">Source</span>
           <span class="claim-source">${escapeHtml(claim.source_field || '—')}</span>
           <span class="claim-divider">·</span>
           <span class="claim-value mono">${escapeHtml(claim.cited_value || '—')}</span>
+          ${r?.expected && status !== 'verified'
+            ? `<span class="claim-divider">·</span><span class="claim-expected mono" title="Value in the source data">expected ${escapeHtml(r.expected)}</span>`
+            : ''}
         </div>`;
       panel.appendChild(card);
     });
   }
 
-  // Insert immediately after #narrativeText
   narrativeText.insertAdjacentElement('afterend', panel);
+}
+
+// Short human-readable label for a claim verification status
+function statusLabel(status) {
+  if (status === 'verified')  return '✓ Verified';
+  if (status === 'mismatch')  return '✕ Mismatch';
+  return '⚠ Unverified';
 }
 
 
 // ── Verification Badge ────────────────────────────────────────
-// Adds a small badge to the .message-meta line showing how many
-// numbers in the narrative were found in the source data.
-// Green = all verified. Amber = some unverified (calculated/inferred).
+// Adds a small badge to the .message-meta line summarizing the
+// claim-based verification result.
+//   Green  — all claims verified
+//   Red    — at least one claim mismatches the source data
+//   Amber  — some claims unverified (calculated / field not in catalog)
+//   Grey   — no structured claims produced
 
 function renderVerificationBadge(block, verification) {
-  // Remove any existing badge
   block.querySelector('.verification-badge')?.remove();
 
   const meta = block.querySelector('.message-meta');
-  if (!meta) return;
+  if (!meta || !verification) return;
+
+  const total      = verification.total || 0;
+  const verified   = verification.verified_count   || 0;
+  const unverified = verification.unverified_count || 0;
+  const mismatches = verification.mismatch_count   || 0;
+  const notes      = Array.isArray(verification.notes) ? verification.notes : [];
 
   const badge = document.createElement('span');
-  badge.className = 'verification-badge ' + (verification.all_clear ? 'verified' : 'unverified');
 
-  if (verification.all_clear) {
-    badge.textContent = `${verification.total} figures · all in source data`;
-    badge.title = 'Every number in the narrative was found in the data sent to the AI.';
+  // Tone: mismatch beats unverified beats clear.
+  let tone;
+  if (total === 0)          tone = 'none';
+  else if (mismatches > 0)  tone = 'mismatch';
+  else if (verification.all_clear) tone = 'verified';
+  else                      tone = 'unverified';
+  badge.className = 'verification-badge tone-' + tone;
+
+  // Headline text.
+  if (total === 0) {
+    badge.textContent = 'No structured claims';
+  } else if (tone === 'verified') {
+    badge.textContent = `${total} claim${total === 1 ? '' : 's'} · all verified`;
   } else {
-    badge.textContent = `${verification.unverified_count} of ${verification.total} figures not in source data`;
-    badge.title =
-      'These figures may be calculated (e.g. weighted averages) or inferred.\n' +
-      'Unverified: ' + verification.unverified.join(', ');
+    const parts = [];
+    if (mismatches) parts.push(`${mismatches} mismatch${mismatches === 1 ? '' : 'es'}`);
+    if (unverified) parts.push(`${unverified} unverified`);
+    badge.textContent = `${verified} of ${total} verified · ${parts.join(', ')}`;
   }
+
+  // Tooltip: list each non-verified claim with its reason.
+  const claimResults = Array.isArray(verification.claim_results)
+    ? verification.claim_results
+    : [];
+  const flagged = claimResults.filter(c => c.status !== 'verified');
+
+  const tipLines = [];
+  if (tone === 'verified') {
+    tipLines.push('Every claim in the narrative matched the source data.');
+  } else if (tone === 'none') {
+    tipLines.push('The LLM did not return structured claims for this response.');
+  } else {
+    tipLines.push('Claims flagged for review:');
+    flagged.slice(0, 8).forEach(c => {
+      const label = c.status === 'mismatch' ? '✕' : '⚠';
+      const reason = c.reason ? ` (${c.reason})` : '';
+      tipLines.push(`${label} ${c.status}${reason}`);
+    });
+    if (flagged.length > 8) tipLines.push(`…and ${flagged.length - 8} more`);
+  }
+  if (notes.length) tipLines.push('Notes: ' + notes.join(', '));
+  badge.title = tipLines.join('\n');
 
   meta.appendChild(badge);
 }
@@ -893,6 +1127,12 @@ function formatKey(k) {
 
 newAnalysisBtn.addEventListener('click', () => {
   abortFollowup();
+  // Drop the inherited-session snapshot — the next first-pass will
+  // set it fresh in showResults() against whatever mode/parameters
+  // the user picks for that run.
+  inheritedMode = '';
+  inheritedParameters = {};
+  lastNarrative = '';
   resultsPanel.hidden = true;
   loadingPanel.hidden = true;
   followupFab.hidden  = true;
@@ -943,12 +1183,18 @@ followupFab.addEventListener('click', () => {
     submitFollowup(q, inputEl);
   });
 
-  // Cmd/Ctrl+Enter to submit
+  // Cmd/Ctrl+Enter to submit; Esc to close (mirrors FAB-click logic).
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       const q = ta.value.trim();
       if (!q) { flashEmpty(ta); return; }
       submitFollowup(q, inputEl);
+    } else if (e.key === 'Escape') {
+      const draft = ta.value.trim();
+      if (draft && !window.confirm('Discard your follow-up draft?')) return;
+      inputEl.remove();
+      followupFab.classList.remove('open');
+      followupFab.focus();
     }
   });
 
@@ -984,6 +1230,7 @@ function abortFollowup() {
     followupController = null;
   }
   followupInFlight = false;
+  followupFab.classList.remove('open');
 }
 
 // Submits a follow-up question.
@@ -999,6 +1246,16 @@ function abortFollowup() {
 // the UI in the submitting state forever.
 async function submitFollowup(question, inputEl) {
   if (followupInFlight) return;            // ignore double-submits
+
+  // Defensive guard: selectedFile should always be set on this path
+  // (the FAB only appears after a successful first run), but route to
+  // the error UX rather than throwing a confusing TypeError if the
+  // module-level reference has been cleared.
+  if (!selectedFile) {
+    showFollowupError(inputEl, 'Something went wrong with the follow-up. Please start a new analysis.');
+    return;
+  }
+
   followupInFlight = true;
 
   const textarea   = inputEl.querySelector('.followup-textarea');
@@ -1030,9 +1287,10 @@ async function submitFollowup(question, inputEl) {
   // server is stateless. If proxy payload size ever becomes a concern, we
   // can add a session-cache on the server and send just a file id.
   //
-  // Note: mode is not sent on follow-ups. The server may need to handle this
-  // differently depending on whether follow-ups should re-run the pipeline
-  // or only call the LLM with the existing context.
+  // Follow-ups inherit the mode + parameters from the first pass on this
+  // thread and send the prior narrative so the LLM has conversational
+  // context. The slicer re-runs server-side → verifier checks against the
+  // same verifiable_values as the first pass.
 
   // Fetch with typed outcome. In demo mode we skip the network and
   // reuse the mock narrative after a short fake think.
@@ -1047,7 +1305,9 @@ async function submitFollowup(question, inputEl) {
     console.log('[KRONOS] Submitting follow-up', {
       resolvedUrl: uploadUrl,
       pageBaseURI: document.baseURI,
-      mode: activeMode || '(none)',
+      inheritedMode: inheritedMode || '(none)',
+      inheritedParameters,
+      hasPriorNarrative: !!lastNarrative,
       fileName: selectedFile?.name,
       promptLength: question.length,
     });
@@ -1065,12 +1325,17 @@ async function submitFollowup(question, inputEl) {
       if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
       const res = await fetch(uploadUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          [KRONOS_SESSION_HEADER]: getSessionId(),
+        },
         body: JSON.stringify({
           file_name: selectedFile.name,
           file_b64,
           prompt: question,
-          mode: '',
+          mode: inheritedMode,
+          parameters: inheritedParameters,
+          prior_narrative: lastNarrative,
         }),
         signal: followupController.signal,
       });
@@ -1158,6 +1423,10 @@ async function submitFollowup(question, inputEl) {
   block.querySelector('.narrative-text').textContent = narrative;
   addCopyButton(block, narrative);
   followupFab.hidden = false;
+
+  // Advance the conversation snapshot — the next follow-up sees THIS
+  // narrative as the prior AI turn.
+  if (narrative) lastNarrative = narrative;
 }
 
 // Inline error row above the textarea. Retry resubmits the current
@@ -1186,6 +1455,11 @@ function showFollowupError(inputEl, message) {
 // Brief shake + tint on the textarea to signal "this is required".
 // Used when the user hits Send / Cmd+Enter with empty content.
 function flashEmpty(ta) {
+  // Clear any prior error row — showing both "you have an error" and
+  // "this is required" at once is contradictory.
+  const inputEl = ta.closest('.followup-input');
+  inputEl?.querySelector('.followup-error')?.remove();
+
   ta.classList.remove('shake');
   // Force a reflow so re-adding the class restarts the animation
   // (otherwise repeated empty-clicks would only animate the first time).

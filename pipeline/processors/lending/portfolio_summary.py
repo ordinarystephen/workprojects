@@ -15,17 +15,29 @@
 #                                  (only when ≥ 2 periods uploaded)
 #
 # Contract (matches MODE_MAP convention in pipeline/analyze.py):
-#   slice(cube) -> { "context": str, "metrics": dict }
+#   slice(cube) -> {
+#     "context": str,               # prose the LLM sees
+#     "metrics": dict,              # Data Snapshot tiles
+#     "verifiable_values": dict,    # label → { value, type } for the verifier
+#   }
+#
+# verifiable_values keys are the English labels that appear in the
+# context; pipeline/validate.verify_claims resolves claim.source_field
+# against these. Labels that would collide across sections (e.g. two
+# "committed" figures) are disambiguated with a suffix like
+# "(industry)" / "(parent)".
 # ──────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
 from pipeline.cube.models import LendingCube
+from pipeline.registry import register_slicer
 
 
 _TOP_N = 5
 
 
+@register_slicer("portfolio_summary")
 def slice_portfolio_summary(cube: LendingCube) -> dict:
     """
     Build the portfolio-summary view: an executive health overview.
@@ -257,7 +269,119 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
              "sentiment": "warning" if downgrades_reg > 0 else "neutral"},
         ]
 
-    return {"context": context, "metrics": metrics}
+    # ── verifiable_values ─────────────────────────────────────
+    # Labels match the English labels the LLM sees in the context. The
+    # verifier (pipeline/validate.py) resolves claim.source_field here.
+    verifiable_values: dict = {
+        "Total Committed Exposure":    {"value": totals.committed,   "type": "currency"},
+        "Total Outstanding Exposure":  {"value": totals.outstanding, "type": "currency"},
+        "Distinct ultimate parents":   {"value": counts.parents,     "type": "count"},
+        "Distinct facilities":         {"value": counts.facilities,  "type": "count"},
+        "Distinct industries":         {"value": counts.industries,  "type": "count"},
+        "Criticized & Classified exposure (SM + SS + Dbt + L)": {
+            "value": totals.criticized_classified, "type": "currency"
+        },
+        "as of": {"value": as_of, "type": "date"},
+    }
+    if totals.cc_pct_of_commitment is not None:
+        verifiable_values["C&C as % of commitment"] = {
+            "value": totals.cc_pct_of_commitment, "type": "percentage",
+        }
+    if current.wapd.display:
+        verifiable_values["Weighted Average PD"] = {
+            "value": current.wapd.display, "type": "string",
+        }
+    if current.walgd.display:
+        verifiable_values["Weighted Average LGD"] = {
+            "value": current.walgd.display, "type": "string",
+        }
+
+    # IG / NIG — publish both the committed figure and the share.
+    if cube.by_ig_status:
+        ig_total = sum(h.current.totals.committed for h in cube.by_ig_status.values())
+        for label, hist in cube.by_ig_status.items():
+            committed = hist.current.totals.committed
+            verifiable_values[label] = {"value": committed, "type": "currency"}
+            if ig_total > 0:
+                verifiable_values[f"{label} (% of rated commitment)"] = {
+                    "value": committed / ig_total, "type": "percentage",
+                }
+
+    # Top industries — name → committed dollars.
+    for name, committed in top_industries:
+        verifiable_values[name] = {"value": committed, "type": "currency"}
+        if totals.committed > 0:
+            verifiable_values[f"{name} (% of total commitment)"] = {
+                "value": committed / totals.committed, "type": "percentage",
+            }
+
+    # Top parents.
+    for c in top_parents:
+        label = c.entity_name or c.entity_id
+        verifiable_values[label] = {"value": c.committed, "type": "currency"}
+        if totals.committed > 0:
+            verifiable_values[f"{label} (% of total commitment)"] = {
+                "value": c.committed / totals.committed, "type": "percentage",
+            }
+
+    # Facility-level WAPD drivers.
+    for f in cube.top_wapd_facility_contributors:
+        label = f.facility_name or f.facility_id
+        verifiable_values[f"{label} (committed)"] = {
+            "value": f.committed, "type": "currency",
+        }
+        verifiable_values[f"{label} (WAPD numerator)"] = {
+            "value": f.wapd_numerator, "type": "currency",
+        }
+        if f.share_of_numerator is not None:
+            verifiable_values[f"{label} (share of firm WAPD numerator)"] = {
+                "value": f.share_of_numerator, "type": "percentage",
+            }
+        if f.implied_pd is not None:
+            verifiable_values[f"{label} (implied PD)"] = {
+                "value": f.implied_pd, "type": "percentage",
+            }
+
+    # Watchlist aggregate.
+    if cube.watchlist.facility_count > 0 or cube.watchlist.committed > 0:
+        verifiable_values["Watchlist facility count"] = {
+            "value": cube.watchlist.facility_count, "type": "count",
+        }
+        verifiable_values["Watchlist committed exposure"] = {
+            "value": cube.watchlist.committed, "type": "currency",
+        }
+
+    # Period-over-period.
+    if cube.month_over_month is not None:
+        mom = cube.month_over_month
+        verifiable_values.update({
+            "New originations":              {"value": len(mom.new_originations), "type": "count"},
+            "Exits":                         {"value": len(mom.exits),            "type": "count"},
+            "New parent relationships":      {"value": len(mom.parent_entrants),  "type": "count"},
+            "Parent relationships exited":   {"value": len(mom.parent_exits),     "type": "count"},
+            "PD rating downgrades": {
+                "value": sum(1 for r in mom.pd_rating_changes if r.direction == "downgrade"),
+                "type":  "count",
+            },
+            "PD rating upgrades": {
+                "value": sum(1 for r in mom.pd_rating_changes if r.direction == "upgrade"),
+                "type":  "count",
+            },
+            "Regulatory rating downgrades": {
+                "value": sum(1 for r in mom.reg_rating_changes if r.direction == "downgrade"),
+                "type":  "count",
+            },
+            "Regulatory rating upgrades": {
+                "value": sum(1 for r in mom.reg_rating_changes if r.direction == "upgrade"),
+                "type":  "count",
+            },
+        })
+
+    return {
+        "context": context,
+        "metrics": metrics,
+        "verifiable_values": verifiable_values,
+    }
 
 
 # ── helpers ───────────────────────────────────────────────────
@@ -270,7 +394,9 @@ def _top_groupings(
         (name, hist.current.totals.committed)
         for name, hist in groupings.items()
     ]
-    pairs.sort(key=lambda kv: kv[1], reverse=True)
+    # Tiebreaker on grouping name (ascending) so re-runs produce identical
+    # ordering when two groupings tie on committed exposure.
+    pairs.sort(key=lambda kv: (-kv[1], kv[0]))
     return pairs[:n]
 
 

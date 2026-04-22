@@ -249,3 +249,13 @@ class LendingCube(BaseModel):
 
     # Populated only when the file contains ≥ 2 periods.
     month_over_month: Optional[MomBlock] = None
+
+    # ── Parameter-picker sources ──────────────────────────────
+    # Exposed for the mode registry: `source: cube.available_portfolios`
+    # in config/modes.yaml resolves here. A "portfolio" in this app is
+    # a risk-assessment industry — swap to `by_horizontal` if the
+    # domain definition changes.
+
+    @property
+    def available_portfolios(self) -> list[str]:
+        return sorted(self.by_industry.keys())

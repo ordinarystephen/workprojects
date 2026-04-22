@@ -285,6 +285,72 @@ Every MLflow call is wrapped in try/except. A tracking failure never surfaces as
 
 ---
 
+## Error Logging Layer (`pipeline/error_log.py`)
+
+Two-tier error capture that runs alongside MLflow. Unlike tracking (dormant by default), the JSONL tier is **always on** so there's an audit trail even before Databricks access is provisioned.
+
+### Tiers
+
+| Tier | When active | What it does |
+|---|---|---|
+| **JSONL** | Always | Appends one JSON record per error event to `<KRONOS_ERROR_LOG_DIR>/kronos-errors.jsonl`. Rotates on ≥10 MB or date change. |
+| **MLflow** | `KRONOS_MLFLOW_ENABLED=true` AND a run is active | Adds `kronos.has_error=true` tag, `kronos_error_<event_type>_count` metric, and a per-event JSON artifact. |
+
+Both tiers are best-effort. A logging failure never raises.
+
+### Entry point
+
+```python
+from pipeline.error_log import log_error
+
+log_error(
+    "llm_failed",             # event_type — stable slug
+    error=exc,                # optional exception
+    mode="portfolio-summary",
+    parameters={...},
+    session_id=sess,          # from X-Kronos-Session header
+    user_prompt=prompt,       # truncated to 250 chars
+    context_snippet=context,  # truncated to 500 chars
+    # …free-form crumbs allowed via **kwargs
+)
+```
+
+### Event types currently emitted from `server.py`
+
+| Event type | Where |
+|---|---|
+| `upload_parse_failed` | base64 decode / parameters JSON parse failures |
+| `parameter_validation_failed` | pre-validate + cube-aware validate |
+| `mode_not_implemented` | placeholder mode invoked |
+| `classification_failed` | missing template sheet / signature collision |
+| `slicer_failed` | generic slicer exception |
+| `llm_failed` | `ask_agent()` exception |
+| `verification_mismatch` | at least one claim cited a known field with the wrong value |
+| `cube_parameter_options_failed` | parameter option resolution failure |
+
+### Field policy
+
+Logged: timestamp, event_type, mode, parameters, session_id, error_class, error_message, stack_trace, bounded context_snippet (≤500 chars), bounded user_prompt (≤250 chars), caller-supplied `additional` dict.
+
+Never logged: full file contents, full narratives, full user prompts, verifiable values (may carry PII / exposure amounts).
+
+### Session ID
+
+Frontend generates a per-tab UUID (`crypto.randomUUID()` with a hex-token fallback) on first page load, persists it in `sessionStorage` under `kronos.session_id`, and sends it on every request as `X-Kronos-Session`. Server reads and passes it into each `log_error()` call. Not auth — correlation only.
+
+### `GET /errors/recent`
+
+Gated by `KRONOS_ERRORS_ENDPOINT_ENABLED`. Returns the tail of the active JSONL file (default 50, cap 500). Returns 404 (not 403) when disabled so the endpoint is indistinguishable from a missing route. MLflow-backed aggregation is a separate future feature.
+
+### Environment variables
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KRONOS_ERROR_LOG_DIR` | `logs/` | Directory for the JSONL file. **TODO — confirm Domino persistent path** (`/domino/datasets/...` conventionally, but verify per-deployment before pinning). |
+| `KRONOS_ERRORS_ENDPOINT_ENABLED` | unset (off) | Set to `true` to enable `GET /errors/recent`. |
+
+---
+
 ## UI — Current State
 
 ### Design System

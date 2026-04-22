@@ -112,7 +112,9 @@ def _normalize(components: list[tuple[str, float]]) -> list[tuple[str, float]]:
     merged: dict[str, float] = {}
     for code, frac in components:
         merged[code] = merged.get(code, 0.0) + frac
-    return sorted(merged.items(), key=lambda kv: _INDEX.get(kv[0], 999))
+    # Secondary sort on the rating code disambiguates the fallback bucket
+    # (999): if two unknown codes appear together the order is stable.
+    return sorted(merged.items(), key=lambda kv: (_INDEX.get(kv[0], 999), kv[0]))
 
 
 def equals(a: object, b: object) -> bool:

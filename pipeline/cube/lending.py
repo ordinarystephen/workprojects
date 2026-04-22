@@ -353,12 +353,20 @@ def _top_contributors(latest_df: pd.DataFrame, latest_period) -> ContributorBloc
             ))
         return out
 
+    # Ties on the primary metric are broken by Ultimate Parent Code (ascending)
+    # so slicer re-runs against the same workbook produce identical orderings —
+    # required for follow-up correctness (verifiable_values must match).
+    def _ranked(by: str) -> pd.DataFrame:
+        return grouped.sort_values(
+            [by, "Ultimate Parent Code"], ascending=[False, True]
+        )
+
     return ContributorBlock(
         period               = _to_date(latest_period),
-        by_committed         = _to_contribs(grouped.sort_values("committed", ascending=False)),
-        by_outstanding       = _to_contribs(grouped.sort_values("outstanding", ascending=False)),
-        by_wapd_contribution = _to_contribs(grouped.sort_values("wapd_numerator", ascending=False)),
-        by_cc_exposure       = _to_contribs(grouped.sort_values("cc_exposure", ascending=False)),
+        by_committed         = _to_contribs(_ranked("committed")),
+        by_outstanding       = _to_contribs(_ranked("outstanding")),
+        by_wapd_contribution = _to_contribs(_ranked("wapd_numerator")),
+        by_cc_exposure       = _to_contribs(_ranked("cc_exposure")),
     )
 
 
@@ -399,7 +407,11 @@ def _top_wapd_facility_contributors(
 
     scope_total_numerator = float(grouped["wapd_numerator"].sum())
 
-    grouped = grouped.sort_values("wapd_numerator", ascending=False).head(n)
+    # Secondary sort on Facility ID (ascending) stabilises ties on WAPD
+    # numerator so follow-up re-runs produce identical top-N ordering.
+    grouped = grouped.sort_values(
+        ["wapd_numerator", "Facility ID"], ascending=[False, True]
+    ).head(n)
 
     out: list[FacilityContributor] = []
     for _, row in grouped.iterrows():
@@ -482,7 +494,10 @@ def _facility_changes(df: pd.DataFrame, ids: set[str]) -> list[FacilityChange]:
             committed     = float(group["Committed Exposure"].sum()),
             outstanding   = float(group["Outstanding Exposure"].sum()),
         ))
-    out.sort(key=lambda c: c.committed, reverse=True)
+    # Explicit tiebreaker on facility_id (ascending) — Python sort is stable,
+    # but declaring the secondary key makes re-run determinism obvious at the
+    # call site and survives future refactors of the upstream groupby.
+    out.sort(key=lambda c: (-c.committed, c.facility_id))
     return out
 
 
@@ -567,7 +582,16 @@ def _exposure_movers(
                "Ultimate Parent Name": "first"}))
     c["prior"] = p
     c["delta"] = c["Committed Exposure"] - c["prior"].fillna(0)
-    c = c.assign(abs_delta=c["delta"].abs()).sort_values("abs_delta", ascending=False)
+    # Explicit secondary sort on Facility ID — relying on groupby's default
+    # sort=True + stable sort would also produce deterministic ties today,
+    # but the explicit key documents the contract and survives upstream
+    # refactors (e.g. anyone adding sort=False for performance).
+    c = c.assign(abs_delta=c["delta"].abs())
+    c = (
+        c.reset_index()
+         .sort_values(["abs_delta", "Facility ID"], ascending=[False, True])
+         .set_index("Facility ID")
+    )
 
     out: list[ExposureMover] = []
     for fid, row in c.head(TOP_N_EXPOSURE_MOVERS).iterrows():
