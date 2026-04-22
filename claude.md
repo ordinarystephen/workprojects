@@ -45,6 +45,9 @@
                              langgraph, langgraph-checkpoint, azure-identity, mlflow[databricks]
   EXPLAINME.md            ← Plain-English integration guide for non-developers
   VSCODE_CHEATSHEET.md    ← VS Code navigation shortcuts for Python tracing
+  LANGCHAIN_AZURE_FORMULA.md  ← Reusable LangGraph + AzureChatOpenAI recipe (app-agnostic)
+  UI_tweaks.md            ← Cheatsheet: where to adjust fonts, layout, card order
+  PULL_ME.md              ← Sync checklist (per-round) for Domino workspace pulls
   /static
     index.html            ← Main UI
     styles.css            ← Full design system + dark mode
@@ -69,14 +72,20 @@
                              validates, returns { classified: {name: df}, metadata }
     /cube                 ← Compute-once layer
       models.py           ← Pydantic schema (LendingCube, KriBlock, GroupingHistory,
-                             ContributorBlock, MomBlock, …) — extra="forbid"
+                             ContributorBlock, FacilityContributor, MomBlock, …)
+                             — all extra="forbid"
       lending.py          ← compute_lending_cube(df) — firm-level + by_industry +
                              by_horizontal + by_ig_status + watchlist + top_contributors
+                             + top_wapd_facility_contributors (firm + per-horizontal)
                              + month_over_month (when ≥ 2 periods)
     /processors           ← Slicers (mode → cube subset → context+metrics)
-      lending/firm_level.py ← slice_firm_level(cube) → { context, metrics }
-                             Builds prose context + tile sections (Firm-Level Overview,
-                             Investment-Grade Split, Horizontal Portfolios, Watchlist)
+      lending/firm_level.py        ← slice_firm_level(cube) → { context, metrics }
+                                     Sections: Firm-Level Overview, Investment-Grade Split,
+                                     Horizontal Portfolios, Watchlist
+      lending/portfolio_summary.py ← slice_portfolio_summary(cube) → { context, metrics }
+                                     Executive view. Sections: Headline, Investment-Grade
+                                     Mix, Top Industries, Top Parents, Top WAPD Drivers
+                                     (Facility), Watchlist, Period Movement
     agent.py              ← LangGraph StateGraph + ResponsesAgent (bank-standard model-from-code)
                              • State, Context, MlflowConfigAgentContext (pydantic)
                              • create_llm() — AzureChatOpenAI with DefaultAzureCredential
@@ -200,9 +209,21 @@ Custom questions (no canned button selected) send `mode = ''` — `analyze()` fa
 | Slug | Template | Slicer | Status |
 |---|---|---|---|
 | `firm-level` | `lending` | `pipeline/processors/lending/firm_level.py :: slice_firm_level` | **Live** |
-| `portfolio-summary` / `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | — | Placeholder fallback only |
+| `portfolio-summary` | `lending` | `pipeline/processors/lending/portfolio_summary.py :: slice_portfolio_summary` | **Live** |
+| `concentration-risk` / `delinquency-trends` / `risk-segments` / `exec-briefing` / `stress-outlook` | — | — | Placeholder fallback only |
 
 The classifier matches sheets by `LendingTemplate.SIGNATURE` (`Facility ID`, `Weighted Average PD Numerator`, `Committed Exposure`). A workbook with no matching sheet raises `ValueError` (surfaced as a 500 with the sheets-seen list). Adding a new lending mode means writing a slicer in `pipeline/processors/lending/` and registering it in `MODE_MAP`. Adding a new workbook shape (e.g. Traded Products) means writing a new Template in `pipeline/templates/` and appending it to `classifier.TEMPLATES`.
+
+**Lending workbook field names** (header strings the classifier expects, not arbitrary): `Regulatory Rating` (was `Current Month Regulatory Rating`), `Credit Watch List Flag` (was `Credit Watchlist Flag`). Workbooks using the old names will fail classification with a missing-required-column error.
+
+**Cube — what's available to slicers** (from `compute_lending_cube`):
+- `firm_level: GroupingHistory` — current + history KriBlocks
+- `by_industry / by_segment / by_branch / by_horizontal / by_ig_status: dict[str, GroupingHistory]`
+- `watchlist: WatchlistAggregate` (firm-level Watch-List Flag = "Y")
+- `top_contributors: ContributorBlock` — parent-level top-10 by committed/outstanding/wapd_numerator/cc_exposure
+- `top_wapd_facility_contributors: list[FacilityContributor]` — facility-level top-10 by `Weighted Average PD Numerator`. Each carries facility/parent IDs, committed, numerator, `implied_pd` (numerator ÷ committed), `pd_rating`, `regulatory_rating`, `share_of_numerator` (within scope)
+- `wapd_contributors_by_horizontal: dict[str, list[FacilityContributor]]` — same shape as above, computed per horizontal portfolio. Stored in cube; not yet rendered by any slicer
+- `month_over_month: MomBlock | None` — populated only when ≥ 2 periods are uploaded
 
 ### Environment Variables
 
@@ -468,13 +489,18 @@ When making a new change for the user, always:
 - [x] **Verified end-to-end on Domino workspace (2026-04-20):** upload → firm-level processor → Azure OpenAI narration → tiles rendered successfully inside the AICE Studio workspace (port 5000, host `0.0.0.0`)
 - [x] **FAB + follow-up state-machine hardening.** Module-level `followupController` (AbortController) + `followupInFlight` guard. `runAnalysis()` and the New Analysis button call `abortFollowup()` so a parent reset cancels the in-flight fetch. 60s fetch timeout fires `controller.abort('timeout')` so a hung Domino proxy can't pin the UI. Closing the FAB with a typed draft prompts to confirm. Empty submit triggers a shake+tint via reused `.shake` keyframe instead of silent no-op. Error row scrolls into view. Catch distinguishes timeout (user-facing message) vs parent abort (silent return)
 - [x] **Validator suppresses date-rewrite false positives.** `pipeline/validate.py` strips ISO (`YYYY-MM-DD`) and prose (`Month DD, YYYY`) dates from both narrative and context before tokenizing, so a context as-of date and the LLM's prose rewrite of it no longer contribute mismatched bare numbers
+- [x] **Portfolio Summary slicer wired.** `pipeline/processors/lending/portfolio_summary.py :: slice_portfolio_summary` produces an executive view from the existing cube (headline scale, IG/NIG mix, top-5 industries, top-5 parents, watchlist, period-over-period when ≥ 2 periods). Registered in `MODE_MAP`. Real system prompt in `pipeline/prompts.py["portfolio-summary"]` replaces the TODO placeholder.
+- [x] **Field renames in lending workbook header strings.** `Current Month Regulatory Rating` → `Regulatory Rating` and `Credit Watchlist Flag` → `Credit Watch List Flag` across `templates/lending.py`, `cube/lending.py`, `parsers/regulatory_rating.py` docs. Workbooks must use the new header names.
+- [x] **Facility-level WAPD contributors.** New `FacilityContributor` model + `LendingCube.top_wapd_facility_contributors` (firm-level top 10) + `LendingCube.wapd_contributors_by_horizontal` (top 10 per horizontal). Each entry carries facility/parent IDs, committed, `wapd_numerator`, `implied_pd` (numerator ÷ committed), `pd_rating`, `regulatory_rating`, `share_of_numerator` (within scope). Surfaced in Portfolio Summary as both an LLM-context block and a "Top 5 WAPD Drivers (Facility)" tile section. Per-horizontal map computed and stored in cube; not yet rendered by any slicer.
+- [x] **Reusable docs.** `LANGCHAIN_AZURE_FORMULA.md` (app-agnostic LangGraph + Azure OpenAI recipe) + `UI_tweaks.md` (cheatsheet for font/layout/card-order tweaks) at repo root.
 
 ### Still To Do
 - [ ] Install `aice-mlflow-plugins==0.1.3` in the bank Python environment (internal package)
 - [ ] Confirm Domino can reach Databricks MLflow from the KRONOS compute environment
 - [ ] Flip `KRONOS_MLFLOW_ENABLED=true` when Databricks / AICE access is provisioned
-- [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace TODO placeholders)
-- [ ] Port remaining slicers (`portfolio-summary`, `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) under `pipeline/processors/lending/` and register in `MODE_MAP` — `firm_level.py` is the working reference pattern. Cube already computes the data each will need (by_industry, by_horizontal, top_contributors, month_over_month)
+- [ ] Paste real wrapper prompts into `pipeline/prompts.py` (replace remaining TODO placeholders for `concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`)
+- [ ] Port remaining slicers (`concentration-risk`, `delinquency-trends`, `risk-segments`, `exec-briefing`, `stress-outlook`) under `pipeline/processors/lending/` and register in `MODE_MAP` — `firm_level.py` and `portfolio_summary.py` are the working reference patterns. Cube already computes the data each will need (by_industry, by_horizontal, top_contributors, top_wapd_facility_contributors, wapd_contributors_by_horizontal, month_over_month)
+- [ ] Surface `wapd_contributors_by_horizontal` in a slicer (currently computed but unused — natural fit for a per-horizontal narrative section, or a future Concentration Risk slicer)
 - [ ] Update `pipeline/prompts.py` firm-level system prompt for the richer cube context (IG/NIG split, horizontal portfolios, watchlist, multi-period coverage, validation note)
 - [ ] Build `deterministic_narrative_payload` in each slicer — mode-scoped, replaces `commentary_facts` as primary LLM input
 - [ ] Add `TradedProductsTemplate` (when field list is provided) and append to `classifier.TEMPLATES`
