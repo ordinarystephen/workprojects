@@ -55,7 +55,7 @@ class LendingTemplate(Template):
         # Regulatory rating uses the OCC scale, can be split (e.g.
         # "SS - 18%, D - 42%, L - 40%"). Parser lives in
         # pipeline/parsers/regulatory_rating.py.
-        "Current Month Regulatory Rating": FieldSpec(role="rating", scale="reg_scale"),
+        "Regulatory Rating": FieldSpec(role="rating", scale="reg_scale"),
 
         # ── Categorical dimensions (bucketable) ───────────────
         "Risk Assessment Industry":     FieldSpec(role="categorical_dim"),
@@ -79,7 +79,7 @@ class LendingTemplate(Template):
         # Trigger value = the cell value that means "in the portfolio".
         # Watchlist is intentionally NOT a horizontal — it's surfaced as
         # a firm-level aggregate tile only.
-        "Credit Watchlist Flag": FieldSpec(role="passthrough"),
+        "Credit Watch List Flag": FieldSpec(role="passthrough"),
         "Leveraged Finance Flag": FieldSpec(
             role="horizontal_flag",
             trigger_value="Y",

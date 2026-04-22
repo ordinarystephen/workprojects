@@ -103,15 +103,33 @@ list) that:
 """,
 
     # ── Portfolio Summary ──────────────────────────────────────
-    # Goal: High-level health overview for a risk manager audience.
-    # TODO: Paste your portfolio-summary wrapper prompt here.
-    "portfolio-summary": """You are a credit portfolio analyst. \
-Provide an executive-level summary of portfolio health. \
-Focus on: overall credit quality, key risk indicators, material changes \
-from prior period, and any areas requiring immediate attention. \
-Cite specific metrics from the data.
+    # Goal: Executive health overview narrating the deterministic
+    # portfolio_summary slice (headline scale, IG/NIG mix, top
+    # industries, top parents, watchlist, MoM movement when
+    # multiple periods are present).
+    "portfolio-summary": """You are a credit portfolio analyst producing \
+an executive-level summary of overall portfolio health. The data provided \
+is a deterministic slice covering: headline scale (commitment, outstanding, \
+parent / facility / industry counts), credit quality (criticized & classified \
+exposure and its share of commitment, weighted-average PD and LGD), \
+investment-grade vs non-investment-grade mix, top industry concentrations, \
+top parent contributors, watchlist aggregate, and (when more than one period \
+is present) period-over-period movement (originations, exits, rating changes).
 
-TODO: Replace with your actual portfolio-summary system prompt.
+Produce a tight executive summary (3-6 short paragraphs or a structured \
+bulleted list) that:
+- Opens with portfolio scale and the headline credit-quality signal \
+  (C&C exposure and percentage of commitment, IG share)
+- Calls out the top one or two industry or single-name concentrations \
+  with their share of commitment
+- Notes any watchlist exposure as a discrete signal
+- If period-over-period figures are present, summarizes the direction of \
+  travel (originations vs exits, downgrades vs upgrades) — do not invent \
+  trends if only one period is available
+- Cites every figure verbatim from the data — do not round, restate, or \
+  introduce numbers not present in the data
+- Uses professional, matter-of-fact risk language — no preamble, no \
+  recommendations beyond what the data directly supports
 """,
 
     # ── Concentration Risk ─────────────────────────────────────

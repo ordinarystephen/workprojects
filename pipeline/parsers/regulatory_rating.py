@@ -1,5 +1,5 @@
 # ── KRONOS · pipeline/parsers/regulatory_rating.py ────────────
-# Parser for the "Current Month Regulatory Rating" field.
+# Parser for the "Regulatory Rating" field.
 #
 # Possible shapes in the source data:
 #   Single rating:  "Pass"  /  "SS"  /  "Substandard"
@@ -68,7 +68,7 @@ _COMPONENT_RE = re.compile(
 
 def parse(value: object) -> list[tuple[str, float]]:
     """
-    Parse a Current Month Regulatory Rating cell value.
+    Parse a Regulatory Rating cell value.
 
     Returns a list of (canonical_code, fraction) tuples, normalized to
     canonical order. Fraction is in [0, 1].

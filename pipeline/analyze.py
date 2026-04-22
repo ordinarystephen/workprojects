@@ -24,6 +24,7 @@ import pandas as pd
 from pipeline.cube.lending import compute_lending_cube
 from pipeline.loaders.classifier import classify
 from pipeline.processors.lending import firm_level as lending_firm_level
+from pipeline.processors.lending import portfolio_summary as lending_portfolio_summary
 
 
 # ══════════════════════════════════════════════════════════════
@@ -42,6 +43,10 @@ MODE_MAP: dict[str, dict] = {
     "firm-level": {
         "template": "lending",
         "slicer":   lending_firm_level.slice_firm_level,
+    },
+    "portfolio-summary": {
+        "template": "lending",
+        "slicer":   lending_portfolio_summary.slice_portfolio_summary,
     },
     # "concentration-risk":  { "template": "lending", "slicer": ... },
     # "delinquency-trends":  { "template": "lending", "slicer": ... },

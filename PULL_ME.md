@@ -170,3 +170,24 @@ The verification badge was showing 1-of-N "unverified" figures whenever the LLM 
 **Behavior change:** the verification badge no longer flags date components as unverified. The `unverified` list returned in the `verification` payload should drop by 1–2 tokens whenever the narrative includes a rewritten date. No change for narratives that don't reference dates.
 
 **Compatibility:** narrower, not wider — fewer tokens get extracted, so fewer false positives. No risk of new false negatives because we only stripped *date* substrings, not anything that could be a real figure.
+
+---
+
+## Round 9 — Portfolio Summary slicer + lending field renames
+
+Commit: _see `git log` on branch `kronos`_
+
+Wires up the second canned mode (`portfolio-summary`) end-to-end against the existing cube, and applies the two source-data field renames you mentioned.
+
+- [ ] `pipeline/processors/lending/portfolio_summary.py` — **NEW FILE.** `slice_portfolio_summary(cube)` produces an executive-health view from the existing `LendingCube`: headline scale (commitment, outstanding, parent / facility / industry counts), credit quality (C&C exposure + % of commitment, weighted PD/LGD), IG vs NIG mix with shares, top-5 industries by committed (with % of commitment), top-5 parent contributors (with % of commitment), watchlist aggregate, and period-over-period movement (originations, exits, PD/reg upgrades + downgrades) when the file contains ≥ 2 periods. Returns the standard `{ context, metrics }` shape.
+- [ ] `pipeline/analyze.py` — added `from pipeline.processors.lending import portfolio_summary as lending_portfolio_summary` and registered `"portfolio-summary": { "template": "lending", "slicer": ... }` in `MODE_MAP`. Clicking *Portfolio Summary* now runs the real slicer instead of falling through to `placeholder_processor()`.
+- [ ] `pipeline/prompts.py` — replaced the TODO placeholder for `"portfolio-summary"` with a real system prompt that names the actual cube slices the LLM will see (headline, IG/NIG mix, top concentrations, watchlist, MoM if present), with explicit instructions to cite figures verbatim and not invent trends when only one period is present.
+- [ ] `pipeline/templates/lending.py` — field renames in column tags: `Current Month Regulatory Rating` → `Regulatory Rating`, `Credit Watchlist Flag` → `Credit Watch List Flag`.
+- [ ] `pipeline/cube/lending.py` — same two renames applied throughout the cube computer (group-by keys + filter conditions).
+- [ ] `pipeline/parsers/regulatory_rating.py` — header comment + docstring updated to reference `Regulatory Rating` (no behavior change).
+
+**Behavior change:** *Portfolio Summary* button now produces a real deterministic slice + LLM narrative instead of the generic placeholder summary. Tile output adds these sections: Headline, Investment-Grade Mix, Top N Industries by Commitment, Top N Parents by Commitment, Watchlist (when present), Period Movement (when ≥ 2 periods).
+
+**Field-rename compatibility:** the lending workbook header strings `Current Month Regulatory Rating` and `Credit Watchlist Flag` no longer match the template — uploads must use `Regulatory Rating` and `Credit Watch List Flag` after this change. The classifier will fail fast with a missing-required-column error if the workbook still uses the old names.
+
+**Repo-only docs in this commit (no Domino pull needed):** `LANGCHAIN_AZURE_FORMULA.md` (reusable Azure OpenAI + LangGraph recipe), `UI_tweaks.md` (cheatsheet for font/layout/card-order tweaks).

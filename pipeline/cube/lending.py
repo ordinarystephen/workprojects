@@ -277,9 +277,9 @@ def _grouping_by_dim(
 
 
 def _watchlist_aggregate(latest_df: pd.DataFrame, latest_period) -> WatchlistAggregate:
-    if "Credit Watchlist Flag" not in latest_df.columns:
+    if "Credit Watch List Flag" not in latest_df.columns:
         return WatchlistAggregate(period=_to_date(latest_period))
-    flag = latest_df["Credit Watchlist Flag"].astype(str).str.strip().str.upper()
+    flag = latest_df["Credit Watch List Flag"].astype(str).str.strip().str.upper()
     mask = flag == "Y"
     sub = latest_df[mask]
     return WatchlistAggregate(
@@ -442,9 +442,9 @@ def _reg_rating_changes(
 ) -> list[RatingChange]:
     if not common_ids:
         return []
-    cols = ["Current Month Regulatory Rating", "Facility Name", "Ultimate Parent Name"]
+    cols = ["Regulatory Rating", "Facility Name", "Ultimate Parent Name"]
     p = df_prior[df_prior["Facility ID"].astype(str).isin(common_ids)] \
-        .groupby("Facility ID").first()[["Current Month Regulatory Rating"]]
+        .groupby("Facility ID").first()[["Regulatory Rating"]]
     c = df_current[df_current["Facility ID"].astype(str).isin(common_ids)] \
         .groupby("Facility ID").first()[cols]
 
@@ -452,8 +452,8 @@ def _reg_rating_changes(
 
     out: list[RatingChange] = []
     for fid, row in joined.iterrows():
-        prior   = row.get("Current Month Regulatory Rating_prior")
-        current = row.get("Current Month Regulatory Rating_current")
+        prior   = row.get("Regulatory Rating_prior")
+        current = row.get("Regulatory Rating_current")
         if reg_rating.equals(prior, current):
             continue
         out.append(RatingChange(
