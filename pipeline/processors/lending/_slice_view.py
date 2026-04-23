@@ -18,7 +18,10 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from pipeline.cube.models import PortfolioSlice
+from pipeline.processors.lending._bucket_status import decorate
 
 
 _TOP_N = 5
@@ -30,6 +33,7 @@ def render_slice(
     kind: str,                 # "Industry Portfolio" or "Horizontal Portfolio"
     firm_committed: float,     # firm-level commitment for share-of-firm calcs
     as_of: str,                # iso date string
+    cube_periods: list[date],  # all periods in the upload — for exit/new detection
 ) -> dict:
     """Render a PortfolioSlice as {context, metrics, verifiable_values}.
 
@@ -121,15 +125,17 @@ def render_slice(
         if rating.investment_grade is not None:
             ig_committed = rating.investment_grade.current.totals.committed
             ig_share = (ig_committed / rated_total * 100) if rated_total > 0 else 0.0
+            ig_label = decorate("Investment Grade", rating.investment_grade, cube_periods)
             lines.append(
-                f"- Investment Grade: ${ig_committed:,.2f} "
+                f"- {ig_label}: ${ig_committed:,.2f} "
                 f"({ig_share:.2f}% of rated commitment)"
             )
 
         if rating.non_investment_grade is not None:
             nig_share = (nig_committed / rated_total * 100) if rated_total > 0 else 0.0
+            nig_label = decorate("Non-Investment Grade", rating.non_investment_grade, cube_periods)
             lines.append(
-                f"- Non-Investment Grade: ${nig_committed:,.2f} "
+                f"- {nig_label}: ${nig_committed:,.2f} "
                 f"({nig_share:.2f}% of rated commitment)"
             )
             if rating.distressed_substats is not None:
@@ -143,16 +149,18 @@ def render_slice(
         if rating.defaulted is not None:
             d_committed = rating.defaulted.current.totals.committed
             d_share = (d_committed / totals.committed * 100) if totals.committed > 0 else 0.0
+            d_label = decorate("Defaulted", rating.defaulted, cube_periods)
             lines.append(
-                f"- Defaulted: ${d_committed:,.2f} "
+                f"- {d_label}: ${d_committed:,.2f} "
                 f"({d_share:.2f}% of slice commitment)"
             )
 
         if rating.non_rated is not None:
             nr_committed = rating.non_rated.current.totals.committed
             nr_share = (nr_committed / totals.committed * 100) if totals.committed > 0 else 0.0
+            nr_label = decorate("Non-Rated", rating.non_rated, cube_periods)
             lines.append(
-                f"- Non-Rated: ${nr_committed:,.2f} "
+                f"- {nr_label}: ${nr_committed:,.2f} "
                 f"({nr_share:.2f}% of slice commitment)"
             )
 
@@ -242,13 +250,13 @@ def render_slice(
     rating_tiles: list[dict] = []
     if rating.investment_grade is not None:
         rating_tiles.append({
-            "label": "Investment Grade",
+            "label": decorate("Investment Grade", rating.investment_grade, cube_periods),
             "value": _money(rating.investment_grade.current.totals.committed),
             "sentiment": "neutral",
         })
     if rating.non_investment_grade is not None:
         rating_tiles.append({
-            "label": "Non-Investment Grade",
+            "label": decorate("Non-Investment Grade", rating.non_investment_grade, cube_periods),
             "value": _money(rating.non_investment_grade.current.totals.committed),
             "sentiment": "neutral",
         })
@@ -260,13 +268,13 @@ def render_slice(
             })
     if rating.defaulted is not None:
         rating_tiles.append({
-            "label": "Defaulted",
+            "label": decorate("Defaulted", rating.defaulted, cube_periods),
             "value": _money(rating.defaulted.current.totals.committed),
             "sentiment": "negative",
         })
     if rating.non_rated is not None:
         rating_tiles.append({
-            "label": "Non-Rated",
+            "label": decorate("Non-Rated", rating.non_rated, cube_periods),
             "value": _money(rating.non_rated.current.totals.committed),
             "sentiment": "neutral",
         })

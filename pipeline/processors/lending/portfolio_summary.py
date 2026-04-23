@@ -32,7 +32,11 @@
 
 from __future__ import annotations
 
-from pipeline.cube.models import LendingCube
+from pipeline.cube.models import GroupingHistory, LendingCube
+from pipeline.processors.lending._bucket_status import (
+    decorate,
+    sort_key,
+)
 from pipeline.registry import register_slicer
 
 
@@ -91,32 +95,37 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
         cube.by_ig_status["Non-Investment Grade"].current.totals.committed
         if "Non-Investment Grade" in cube.by_ig_status else 0.0
     )
+    periods = cube.metadata.periods
     if cube.by_ig_status or cube.by_defaulted or cube.by_non_rated:
         context_lines += ["", "Rating-category composition (committed exposure):"]
-        for label in ("Investment Grade", "Non-Investment Grade"):
-            if label not in cube.by_ig_status:
+        for name in ("Investment Grade", "Non-Investment Grade"):
+            if name not in cube.by_ig_status:
                 continue
-            committed = cube.by_ig_status[label].current.totals.committed
+            hist = cube.by_ig_status[name]
+            committed = hist.current.totals.committed
             share = (committed / rated_total * 100) if rated_total > 0 else 0.0
+            label = decorate(name, hist, periods)
             context_lines.append(
                 f"- {label}: ${committed:,.2f} ({share:.2f}% of rated commitment)"
             )
-            if label == "Non-Investment Grade" and cube.nig_distressed_substats is not None:
+            if name == "Non-Investment Grade" and cube.nig_distressed_substats is not None:
                 ds = cube.nig_distressed_substats
                 ds_share = (ds.committed / nig_committed * 100) if nig_committed > 0 else 0.0
                 context_lines.append(
                     f"    Of which, Distressed (C13): ${ds.committed:,.2f} "
                     f"({ds_share:.2f}% of NIG), {ds.facility_count:,} facilities"
                 )
-        for label, hist in cube.by_defaulted.items():
+        for name, hist in cube.by_defaulted.items():
             committed = hist.current.totals.committed
             share = (committed / totals.committed * 100) if totals.committed > 0 else 0.0
+            label = decorate(name, hist, periods)
             context_lines.append(
                 f"- {label}: ${committed:,.2f} ({share:.2f}% of total commitment)"
             )
-        for label, hist in cube.by_non_rated.items():
+        for name, hist in cube.by_non_rated.items():
             committed = hist.current.totals.committed
             share = (committed / totals.committed * 100) if totals.committed > 0 else 0.0
+            label = decorate(name, hist, periods)
             context_lines.append(
                 f"- {label}: ${committed:,.2f} ({share:.2f}% of total commitment)"
             )
@@ -128,14 +137,16 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
             "",
             f"Top {len(top_industries)} industries by committed exposure:",
         ]
-        for name, committed in top_industries:
+        for name, hist in top_industries:
+            committed = hist.current.totals.committed
             share = (
                 (committed / totals.committed * 100)
                 if totals.committed > 0
                 else 0.0
             )
+            label = decorate(name, hist, periods)
             context_lines.append(
-                f"- {name}: ${committed:,.2f} ({share:.2f}% of total commitment)"
+                f"- {label}: ${committed:,.2f} ({share:.2f}% of total commitment)"
             )
 
     # ── Top parent contributors ───────────────────────────────
@@ -247,31 +258,32 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
 
     if cube.by_ig_status or cube.by_defaulted or cube.by_non_rated:
         rating_tiles: list[dict] = []
-        for label in ("Investment Grade", "Non-Investment Grade"):
-            if label not in cube.by_ig_status:
+        for name in ("Investment Grade", "Non-Investment Grade"):
+            if name not in cube.by_ig_status:
                 continue
-            committed = cube.by_ig_status[label].current.totals.committed
+            hist = cube.by_ig_status[name]
+            committed = hist.current.totals.committed
             share_pct = (committed / rated_total * 100) if rated_total > 0 else None
             rating_tiles.append({
-                "label": label,
+                "label": decorate(name, hist, periods),
                 "value": (f"{share_pct:.1f}%" if share_pct is not None else "n/a"),
                 "sentiment": "neutral",
             })
-            if label == "Non-Investment Grade" and cube.nig_distressed_substats is not None:
+            if name == "Non-Investment Grade" and cube.nig_distressed_substats is not None:
                 rating_tiles.append({
                     "label": "  of which Distressed",
                     "value": _money(cube.nig_distressed_substats.committed),
                     "sentiment": "warning",
                 })
-        for label, hist in cube.by_defaulted.items():
+        for name, hist in cube.by_defaulted.items():
             rating_tiles.append({
-                "label": label,
+                "label": decorate(name, hist, periods),
                 "value": _money(hist.current.totals.committed),
                 "sentiment": "negative",
             })
-        for label, hist in cube.by_non_rated.items():
+        for name, hist in cube.by_non_rated.items():
             rating_tiles.append({
-                "label": label,
+                "label": decorate(name, hist, periods),
                 "value": _money(hist.current.totals.committed),
                 "sentiment": "neutral",
             })
@@ -280,8 +292,10 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
 
     if top_industries:
         metrics[f"Top {len(top_industries)} Industries by Commitment"] = [
-            {"label": name, "value": _money(committed), "sentiment": "neutral"}
-            for name, committed in top_industries
+            {"label": decorate(name, hist, periods),
+             "value": _money(hist.current.totals.committed),
+             "sentiment": "neutral"}
+            for name, hist in top_industries
         ]
 
     if top_parents:
@@ -390,8 +404,11 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
                 "value": ds.committed / nig_committed, "type": "percentage",
             }
 
-    # Top industries — name → committed dollars.
-    for name, committed in top_industries:
+    # Top industries — name → committed dollars. Keys remain plain
+    # (no exit/new suffix) per Option-A: lifecycle markers live in
+    # rendered context/metrics only, not in verifiable_values keys.
+    for name, hist in top_industries:
+        committed = hist.current.totals.committed
         verifiable_values[name] = {"value": committed, "type": "currency"}
         if totals.committed > 0:
             verifiable_values[f"{name} (% of total commitment)"] = {
@@ -471,16 +488,19 @@ def slice_portfolio_summary(cube: LendingCube) -> dict:
 
 def _top_groupings(
     groupings: dict[str, "GroupingHistory"], n: int
-) -> list[tuple[str, float]]:
-    """Return the top-n (name, committed) pairs from a by_X grouping dict."""
-    pairs = [
-        (name, hist.current.totals.committed)
-        for name, hist in groupings.items()
-    ]
-    # Tiebreaker on grouping name (ascending) so re-runs produce identical
-    # ordering when two groupings tie on committed exposure.
-    pairs.sort(key=lambda kv: (-kv[1], kv[0]))
-    return pairs[:n]
+) -> list[tuple[str, "GroupingHistory"]]:
+    """Return the top-n (name, GroupingHistory) pairs from a by_X grouping dict.
+
+    Sort uses the shared ``_bucket_status.sort_key`` so exited buckets
+    sink to the bottom regardless of their historical magnitude. With
+    enough active buckets, exits are pushed past the top-n cut and
+    don't appear in the section at all — which is the right behavior
+    for an executive "top concentrations" callout. Tie-break on name
+    ascending so re-runs produce identical ordering.
+    """
+    items = list(groupings.items())
+    items.sort(key=lambda kv: sort_key(kv[0], kv[1]))
+    return items[:n]
 
 
 def _money(amount: float) -> str:

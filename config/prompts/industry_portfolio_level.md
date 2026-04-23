@@ -15,8 +15,15 @@ Produce a tight narrative (3-5 short paragraphs or a structured bulleted list) t
 - Cites every figure verbatim from the data — do not round, restate, or introduce numbers not present in the data
 - Uses professional, matter-of-fact risk language — no preamble
 
+Exits and new entries:
+- Within the {{portfolio}} industry, individual rating buckets (Investment Grade, Non-Investment Grade, Defaulted, Non-Rated) may carry a suffix marker — "(exited)" means the bucket had exposure in this industry in a prior period but has none in the latest period; "(new this period)" means the bucket appears for the first time in this industry in the latest period (only meaningful when the upload covers more than one period).
+- These markers are lifecycle signals, not part of the bucket's name. Do not treat "Investment Grade (exited)" as a different bucket from "Investment Grade" — it is the same bucket flagged as having no current exposure within this industry.
+- When a rating bucket within the industry is marked "(exited)" or "(new this period)", narrate it as a credit-mix shift within the industry (e.g. "the Non-Investment Grade exposure within {{portfolio}} has fully exited this period"). It is a portfolio-shape change worth surfacing, not just a $0 line.
+- Do not invent markers — only narrate "(exited)" / "(new this period)" status when the data shows it. If neither marker is present on a bucket, do not speculate about its lifecycle.
+
 Claims:
 - Emit a Claim for every figure you cite.
 - source_field must match a label from the Portfolio Data verbatim. Industry-scoped labels are prefixed "Industry Portfolio: {{portfolio}} —" to disambiguate them from firm-level figures (e.g. "Industry Portfolio: {{portfolio}} — Committed Exposure", "Industry Portfolio: {{portfolio}} — Investment Grade", "Industry Portfolio: {{portfolio}} — Distressed (of which)", "Industry Portfolio: {{portfolio}} — <Parent name>").
 - Rating-category shares within the industry use the "(% of rated commitment)" suffix for IG/NIG, "(% of slice commitment)" for Defaulted/Non-Rated, and "(% of NIG)" for the Distressed sub-line.
+- When citing a bucket that carries an "(exited)" or "(new this period)" suffix in the data, drop that suffix from source_field — cite the plain prefixed label (e.g. "Industry Portfolio: {{portfolio}} — Investment Grade", not "Industry Portfolio: {{portfolio}} — Investment Grade (exited)"). The suffix is a display marker; the verifiable label is the plain name.
 - For values you compute yourself (sums, ratios, deltas not pre-computed), set source_field to "calculated".

@@ -24,6 +24,10 @@
 from __future__ import annotations
 
 from pipeline.cube.models import LendingCube
+from pipeline.processors.lending._bucket_status import (
+    decorate,
+    sort_key,
+)
 from pipeline.registry import register_slicer
 
 
@@ -91,20 +95,26 @@ def slice_firm_level(cube: LendingCube) -> dict:
 
     # Rating-category composition (IG / NIG / Defaulted / Non-Rated,
     # plus the Distressed sub-stat within NIG). Each top-level bucket
-    # appears only when it has any rows in the latest period.
+    # appears only when it has had any rows across the upload's periods.
     rating_section = _rating_category_section(cube)
     if rating_section:
         context_lines += ["", "Rating-category composition (committed exposure):"]
         context_lines += rating_section
 
-    # Horizontal portfolios.
+    # Horizontal portfolios. Sort exits to the bottom; otherwise rank
+    # by descending committed (active and new buckets interleave).
     if cube.by_horizontal:
         context_lines += ["", "Horizontal portfolios (committed exposure):"]
-        for name, hist in cube.by_horizontal.items():
+        ranked_horizontals = sorted(
+            cube.by_horizontal.items(),
+            key=lambda kv: sort_key(kv[0], kv[1]),
+        )
+        for name, hist in ranked_horizontals:
             committed = hist.current.totals.committed
             facilities = hist.current.counts.facilities
+            display = decorate(name, hist, cube.metadata.periods)
             context_lines.append(
-                f"- {name}: ${committed:,.2f} across {facilities:,} facilities"
+                f"- {display}: ${committed:,.2f} across {facilities:,} facilities"
             )
 
     # Watchlist firm-level aggregate.
@@ -164,11 +174,15 @@ def slice_firm_level(cube: LendingCube) -> dict:
         metrics["Rating Category Composition"] = rating_tiles
 
     if cube.by_horizontal:
+        ranked_horizontals = sorted(
+            cube.by_horizontal.items(),
+            key=lambda kv: sort_key(kv[0], kv[1]),
+        )
         metrics["Horizontal Portfolios"] = [
-            {"label": name,
+            {"label": decorate(name, hist, cube.metadata.periods),
              "value": _money(hist.current.totals.committed),
              "sentiment": "warning" if name == "Global Recovery Management" else "neutral"}
-            for name, hist in cube.by_horizontal.items()
+            for name, hist in ranked_horizontals
         ]
 
     if cube.watchlist.facility_count > 0:
@@ -292,18 +306,25 @@ def _rating_category_section(cube: "LendingCube") -> list[str]:
     Distressed is rendered as an indented sub-line under NIG so the
     LLM (and a human reader of the context) understand it's a subset,
     not a peer bucket. Defaulted and Non-Rated are top-level peers.
+    Bucket labels carry "(exited)" / "(new this period)" markers when
+    the bucket's lifecycle warrants — Distressed sub-stat is omitted
+    entirely (None) when no C13 rows exist in the latest period, so
+    no marker is needed there.
     """
+    periods = cube.metadata.periods
     lines: list[str] = []
     if "Investment Grade" in cube.by_ig_status:
         hist = cube.by_ig_status["Investment Grade"]
+        label = decorate("Investment Grade", hist, periods)
         lines.append(
-            f"- Investment Grade: ${hist.current.totals.committed:,.2f}, "
+            f"- {label}: ${hist.current.totals.committed:,.2f}, "
             f"{hist.current.counts.facilities:,} facilities"
         )
     if "Non-Investment Grade" in cube.by_ig_status:
         hist = cube.by_ig_status["Non-Investment Grade"]
+        label = decorate("Non-Investment Grade", hist, periods)
         lines.append(
-            f"- Non-Investment Grade: ${hist.current.totals.committed:,.2f}, "
+            f"- {label}: ${hist.current.totals.committed:,.2f}, "
             f"{hist.current.counts.facilities:,} facilities"
         )
         if cube.nig_distressed_substats is not None:
@@ -312,12 +333,14 @@ def _rating_category_section(cube: "LendingCube") -> list[str]:
                 f"    Of which, Distressed (C13): ${ds.committed:,.2f}, "
                 f"{ds.facility_count:,} facilities"
             )
-    for label, hist in cube.by_defaulted.items():
+    for name, hist in cube.by_defaulted.items():
+        label = decorate(name, hist, periods)
         lines.append(
             f"- {label}: ${hist.current.totals.committed:,.2f}, "
             f"{hist.current.counts.facilities:,} facilities"
         )
-    for label, hist in cube.by_non_rated.items():
+    for name, hist in cube.by_non_rated.items():
+        label = decorate(name, hist, periods)
         lines.append(
             f"- {label}: ${hist.current.totals.committed:,.2f}, "
             f"{hist.current.counts.facilities:,} facilities"
@@ -327,18 +350,19 @@ def _rating_category_section(cube: "LendingCube") -> list[str]:
 
 def _rating_category_tiles(cube: "LendingCube") -> list[dict]:
     """Data Snapshot tiles for the rating-category composition."""
+    periods = cube.metadata.periods
     tiles: list[dict] = []
     if "Investment Grade" in cube.by_ig_status:
         hist = cube.by_ig_status["Investment Grade"]
         tiles.append({
-            "label": "Investment Grade",
+            "label": decorate("Investment Grade", hist, periods),
             "value": _money(hist.current.totals.committed),
             "sentiment": "neutral",
         })
     if "Non-Investment Grade" in cube.by_ig_status:
         hist = cube.by_ig_status["Non-Investment Grade"]
         tiles.append({
-            "label": "Non-Investment Grade",
+            "label": decorate("Non-Investment Grade", hist, periods),
             "value": _money(hist.current.totals.committed),
             "sentiment": "neutral",
         })
@@ -348,15 +372,15 @@ def _rating_category_tiles(cube: "LendingCube") -> list[dict]:
                 "value": _money(cube.nig_distressed_substats.committed),
                 "sentiment": "warning",
             })
-    for label, hist in cube.by_defaulted.items():
+    for name, hist in cube.by_defaulted.items():
         tiles.append({
-            "label": label,
+            "label": decorate(name, hist, periods),
             "value": _money(hist.current.totals.committed),
             "sentiment": "negative",
         })
-    for label, hist in cube.by_non_rated.items():
+    for name, hist in cube.by_non_rated.items():
         tiles.append({
-            "label": label,
+            "label": decorate(name, hist, periods),
             "value": _money(hist.current.totals.committed),
             "sentiment": "neutral",
         })

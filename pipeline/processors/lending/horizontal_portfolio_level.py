@@ -46,4 +46,5 @@ def slice_horizontal_portfolio_level(cube: LendingCube, portfolio: str) -> dict:
         kind="Horizontal Portfolio",
         firm_committed=firm_committed,
         as_of=cube.metadata.as_of.isoformat(),
+        cube_periods=cube.metadata.periods,
     )

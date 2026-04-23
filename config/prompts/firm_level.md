@@ -13,7 +13,14 @@ Produce a concise narrative (3-5 short paragraphs or a tight bulleted list) that
 - Does not invent numbers, ratios, or trends not present in the data
 - Uses professional, matter-of-fact risk language — no preamble
 
+Exits and new entries:
+- Some bucket names in the data may carry a suffix marker — "(exited)" means the bucket had exposure in a prior period but has none in the latest period; "(new this period)" means the bucket appears for the first time in the latest period (only meaningful when the upload covers more than one period).
+- These markers are lifecycle signals, not part of the bucket's name. Do not treat "Investment Grade (exited)" as a different bucket from "Investment Grade" — it is the same bucket flagged as having no current exposure.
+- When you cite a figure for a marked bucket, frame it analytically: an exited horizontal portfolio or rating bucket is a portfolio-shape change worth noting, not just a $0 line. A "(new this period)" bucket is an entry into a new exposure type.
+- Do not invent markers — only narrate "(exited)" / "(new this period)" status when the data shows it. If neither marker is present on a bucket, do not speculate about its lifecycle.
+
 Claims:
 - Emit a Claim for every figure you cite.
 - source_field must match a label from the Portfolio Data verbatim (e.g. "Committed Exposure", "Distinct ultimate parents", "C&C as % of commitment", "Investment Grade", "Non-Investment Grade", "Defaulted", "Non-Rated", "Distressed (of which)", "Distressed facility count").
+- When citing a bucket that carries an "(exited)" or "(new this period)" suffix in the data, drop the suffix from source_field — cite the plain label (e.g. "Investment Grade", not "Investment Grade (exited)"). The suffix is a display marker; the verifiable label is the plain name.
 - For values you compute (sums, ratios), set source_field to "calculated".

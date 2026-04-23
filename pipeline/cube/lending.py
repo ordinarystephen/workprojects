@@ -545,9 +545,32 @@ def _grouping_history(
     periods: list,
     mask: Optional[pd.Series],
 ) -> GroupingHistory:
-    """KriBlock for the latest period plus history for prior periods."""
+    """KriBlock for the latest period plus history for prior periods.
+
+    ``current`` is always pinned to the cube's latest period
+    (``periods[-1]``), even when this bucket has no rows there. When
+    that happens ``current`` is an empty KriBlock (all zeros) tagged
+    with ``latest_period`` and ``history`` still carries the real data
+    from earlier periods — the "exited bucket" shape. Slicers detect
+    it via ``history[-1].period != current.period`` (or equivalently
+    ``current.totals.committed == 0 and history``).
+
+    ``history`` is actual-data-points only; periods where the bucket
+    had zero rows are omitted rather than back-filled with zero blocks.
+    This keeps MoM deltas computed against ``history[-2] → history[-1]``
+    honest.
+
+    The caller is responsible for deciding whether a bucket should
+    exist at all (e.g. ``if mask.any():`` guards for rating-category
+    masks). This function assumes it's being called for a bucket with
+    at least one matching row somewhere; when called for a mask that
+    matches zero rows everywhere it still returns a valid empty shape
+    but the bucket should normally not be stored.
+    """
     period_col = LendingTemplate.period_column()
     scoped = df if mask is None else df[mask]
+    latest_period = periods[-1]
+    latest_as_date = _to_date(latest_period)
 
     history: list[KriBlock] = []
     for p in periods:
@@ -556,12 +579,19 @@ def _grouping_history(
             continue
         history.append(_kri_block(slice_, p))
 
-    if not history:
-        # No rows survived the mask — return an empty current block at latest.
-        empty = _kri_block(scoped.iloc[0:0], periods[-1])
-        return GroupingHistory(current=empty, history=[])
+    # Pin current to latest_period. If the bucket had rows there,
+    # reuse the last history block (same period); otherwise emit an
+    # empty KriBlock tagged with latest_period so the reconciliation
+    # invariant holds and slicers see a consistent "as-of" shape.
+    # `history[-1].period` is a python date (via _to_date in _kri_block),
+    # so compare against the date form of latest_period — a direct
+    # date-to-Timestamp comparison is False even when the values agree.
+    if history and history[-1].period == latest_as_date:
+        current = history[-1]
+    else:
+        current = _kri_block(scoped.iloc[0:0], latest_period)
 
-    return GroupingHistory(current=history[-1], history=history)
+    return GroupingHistory(current=current, history=history)
 
 
 def _normalize_dim(value) -> str:
