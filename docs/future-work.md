@@ -264,3 +264,38 @@ mode outputs into a single document (e.g. a risk assessment spanning
 lending + traded products + firm-level); `lengths` modify synthesis output
 length (full report, executive briefing, quick update). Neither is
 implemented.
+
+### Standardize label forms across slicers
+
+**What:** Currently `firm_level` and `portfolio_summary` use divergent label forms for identical underlying values:
+
+| firm_level | portfolio_summary | Underlying value |
+|---|---|---|
+| `Committed Exposure` | `Total Committed Exposure` | Firm-wide committed |
+| `Outstanding Exposure` | `Total Outstanding Exposure` | Firm-wide outstanding |
+| `Criticized & Classified (SM + SS + Dbt + L)` | `Criticized & Classified exposure (SM + SS + Dbt + L)` | Firm-wide C&C |
+| `Distinct risk assessment industries` | `Distinct industries` | Industry bucket count |
+
+The divergence is currently documented as intentional scope-based convention in `docs/available-kris.md` (bare labels for firm-wide-only context, "Total" prefix for contexts juxtaposing totals against slice figures). That's a reasonable interim position but long-term the split is a cognitive cost for prompt authors and introduces minor LLM confusion when the same underlying figure has two names.
+
+**Why deferred:** No production bug. The verifier matches strings; neither form is wrong. Migrating touches every active slicer, every prompt, and changes the LLM's input distribution during a stabilization period. Better to do it as a dedicated pass with tests in place to catch regressions.
+
+**Two possible paths (decide at pickup time):**
+
+- **Path 1 — pick one form, migrate everything.** Standardize on either the bare or the "Total" form universally. Cleanest end state, one-time cost.
+- **Path 3 — canonical form with contextual prefixing.** Adopt a consistent pattern like `Firm — Committed Exposure` / `Portfolio — Committed Exposure`, mirroring the per-slice prefix convention (`Industry Portfolio: Energy — Committed Exposure`). Fully consistent, largest migration.
+
+Path 2 (codify the current divergence as intentional) is what exists now — documented in `available-kris.md`. If Path 1 or Path 3 is picked up later, update the doc to match.
+
+**Blocked on:** Part 5 smoke tests landing. Without smoke tests, a label rename is a manual-verification-only refactor and high risk for silent regressions. Once smoke tests exist, the migration can be performed with before/after test confirmation that no numbers shifted.
+
+**Design notes when picked up:**
+- Update every slicer's `verifiable_values` publication.
+- Update every prompt in `config/prompts/` that references old label forms.
+- Update `docs/available-kris.md` to reflect the new canonical form.
+- Run the full smoke test suite before and after, confirm no mismatches.
+- Consider whether the migration should be a single commit or staged by slicer — staging makes review easier but extends the period of inconsistency.
+
+**Triggered by:** Smoke tests existing + either a concrete pain point from prompt authors (this slicer's labels are inconsistent) or a broader doc/prompt refactor where label work is already touching these files.
+
+
