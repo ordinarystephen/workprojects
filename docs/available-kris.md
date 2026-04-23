@@ -60,8 +60,14 @@ data-quality signal.
 
 Source: [`LendingCube.firm_level`](../pipeline/cube/models.py),
 slicer: [`firm_level.py`](../pipeline/processors/lending/firm_level.py).
-Published by: `firm_level` (and most labels overlap with
+Published by: `firm_level` (and many labels overlap with
 `portfolio_summary` — see notes below).
+
+Round 18 widened firm_level's surface beyond firm vitals. The slicer
+now publishes per-industry, per-horizontal, per-parent, per-WAPD-driver,
+and per-MoM-event labels, each carrying a scope-disambiguating prefix.
+Firm-level vitals stay plain; cross-scope labels carry their family
+prefix.
 
 ### Counts
 
@@ -71,6 +77,8 @@ Published by: `firm_level` (and most labels overlap with
 | `Distinct partners` | count | Unique partners. **Firm-level only — `portfolio_summary` omits.** |
 | `Distinct facilities` | count | Unique facilities. |
 | `Distinct risk assessment industries` | count | Industry buckets. **Firm-level form.** `portfolio_summary` publishes the same value under the shorter label `Distinct industries`. |
+| `Distinct branches` | count | Number of distinct branches (derived from `len(cube.by_branch)`). **firm_level only.** |
+| `Distinct segments` | count | Number of distinct portfolio segments (derived from `len(cube.by_segment)`). **firm_level only.** |
 
 ### Exposure totals (currency)
 
@@ -97,7 +105,7 @@ republish these line items.
 
 | Label | Type | Notes |
 |---|---|---|
-| `Weighted Average PD` | string (rating display, e.g. `C06`) | Slicer publishes the rendered display string, not the raw decimal. |
+| `Weighted Average PD` | string (rating display, e.g. `C06`) | Slicer publishes the rendered display string, not the raw decimal. The raw decimal was cut from both context and verifiable_values in Round 18 — display only. |
 | `Weighted Average LGD` | string (e.g. `42.00%`) | Same — verifier compares the rendered string. |
 
 ### Period metadata
@@ -105,6 +113,123 @@ republish these line items.
 | Label | Type |
 |---|---|
 | `as of` | date (ISO) |
+
+### Industry breakdown — firm_level (Round 18)
+
+For each industry on `LendingCube.by_industry` (no truncation — every
+industry appears, sorted by committed desc with exited buckets at the
+bottom). `<industry>` is the industry name as it keys the cube
+(blank/NaN industries are bucketed under `Unclassified` per
+`_grouping_by_dim`).
+
+| Label | Type |
+|---|---|
+| `Industry: <industry> — Committed` | currency |
+| `Industry: <industry> — Outstanding` | currency |
+| `Industry: <industry> — Facility count` | count |
+| `Industry: <industry> — % of firm committed` | percentage |
+| `Industry: <industry> — Weighted Average PD` | string |
+
+Note: `firm_level`'s industry labels carry the prefix `Industry: ` —
+distinct from the per-slice `industry_portfolio_level` slicer's prefix
+`Industry Portfolio: `. Same data, different prefix because the labels
+have different scope (firm-wide vs. one-slice-only).
+
+### Horizontal breakdown — firm_level (Round 18)
+
+For each horizontal on `LendingCube.by_horizontal`:
+
+| Label | Type |
+|---|---|
+| `<horizontal name>` | currency (committed) | **Backward-compat key — kept so existing tests/prompts that cite the plain horizontal name continue to resolve. Prefer the prefixed form below for new prompts.** |
+| `Horizontal: <horizontal> — Committed` | currency |
+| `Horizontal: <horizontal> — Outstanding` | currency |
+| `Horizontal: <horizontal> — Facility count` | count |
+| `Horizontal: <horizontal> — % of firm committed` | percentage |
+| `Horizontal: <horizontal> — Weighted Average PD` | string |
+
+### Top-10 parent borrowers — firm_level (Round 18)
+
+For each of the top 10 parents from
+`cube.top_contributors.by_committed[:10]`. `<parent>` is the parent
+name (or entity_id when name is missing).
+
+| Label | Type | Notes |
+|---|---|---|
+| `Top Parent: <parent> — Committed` | currency | |
+| `Top Parent: <parent> — Outstanding` | currency | |
+| `Top Parent: <parent> — % of firm committed` | percentage | |
+| `Top Parent: <parent> — Implied PD rating` | string | **Derived inline** as `pd_scale.code_for_pd(wapd_numerator / committed)` — `Contributor` does not store a PD rating. |
+
+`Contributor` does not store a per-parent facility count, so no
+`Top Parent: <parent> — Facility count` label is published. Future
+cube extension required to true the spec.
+
+### Top-10 facility-level WAPD drivers — firm_level (Round 18)
+
+For each of the top 10 facilities from
+`cube.top_wapd_facility_contributors[:10]`. `<facility>` is the
+facility name (or facility_id when name is missing).
+
+| Label | Type |
+|---|---|
+| `WAPD Driver: <facility> — Committed` | currency |
+| `WAPD Driver: <facility> — WAPD numerator` | currency |
+| `WAPD Driver: <facility> — Share of firm WAPD numerator` | percentage |
+| `WAPD Driver: <facility> — Implied PD` | percentage |
+| `WAPD Driver: <facility> — PD rating` | string |
+
+### Month-over-period — firm_level (Round 18)
+
+Populated only when `cube.month_over_month is not None` (i.e. the
+upload spans ≥ 2 periods). Aggregate keys live under the `MoM: `
+prefix. Per-facility events use `MoM PD Change: `, `MoM Reg Change: `,
+`MoM Exposure Mover: ` prefixes.
+
+| Label | Type | Notes |
+|---|---|---|
+| `MoM: Firm committed change` | currency | Signed delta vs prior period. |
+| `MoM: Firm committed change (%)` | percentage | Signed % delta. |
+| `MoM: Firm outstanding change` | currency | |
+| `MoM: Firm WAPD shift` | string | Format `<prior display> → <current display>` (e.g. `C06 → C08`). |
+| `MoM: Firm facility count change` | count | Signed integer delta. |
+| `MoM: New originations count` | count | |
+| `MoM: New originations total` | currency | Σ committed across new originations. |
+| `MoM: Exits count` | count | |
+| `MoM: Exits total` | currency | |
+| `MoM: PD rating changes count` | count | |
+| `MoM: PD downgrades count` | count | |
+| `MoM: PD upgrades count` | count | |
+| `MoM: Reg rating changes count` | count | |
+| `MoM: Reg downgrades count` | count | |
+| `MoM: Reg upgrades count` | count | |
+
+For each of the first 3 PD rating changes (in cube's Facility-ID-sorted
+order — `RatingChange` does not carry a committed field, so true
+"top-3 by committed" is not derivable):
+
+| Label | Type |
+|---|---|
+| `MoM PD Change: <facility> — From` | string |
+| `MoM PD Change: <facility> — To` | string |
+| `MoM PD Change: <facility> — Direction` | string |
+
+For each of the first 3 regulatory rating changes (same caveat):
+
+| Label | Type |
+|---|---|
+| `MoM Reg Change: <facility> — From` | string |
+| `MoM Reg Change: <facility> — To` | string |
+| `MoM Reg Change: <facility> — Direction` | string |
+
+For each of the top 3 exposure movers (`mom.top_exposure_movers[:3]`,
+already ordered by `abs(delta)` in the cube):
+
+| Label | Type |
+|---|---|
+| `MoM Exposure Mover: <facility> — Prior committed` | currency |
+| `MoM Exposure Mover: <facility> — Current committed` | currency |
+| `MoM Exposure Mover: <facility> — Delta committed` | currency |
 
 ---
 
@@ -450,19 +575,19 @@ When adding a new slicer, pick the convention that matches the scope the slicer 
 
 | Cube field | `firm_level` | `portfolio_summary` | `industry_portfolio_level` | `horizontal_portfolio_level` |
 |---|:-:|:-:|:-:|:-:|
-| `firm_level` totals/counts | ✅ | ✅ | — (uses for share-of-firm only) | — (same) |
+| `firm_level` totals/counts | ✅ (+ branch/segment counts) | ✅ | — (uses for share-of-firm only) | — (same) |
 | `by_ig_status` | ✅ | ✅ | via `industry_details` | via `horizontal_details` |
 | `by_defaulted` | ✅ | ✅ | via `industry_details` | via `horizontal_details` |
 | `by_non_rated` | ✅ | ✅ | via `industry_details` | via `horizontal_details` |
 | `nig_distressed_substats` | ✅ | ✅ (+ `% of NIG`) | via `industry_details` | via `horizontal_details` |
-| `by_industry` | — | top-5 only | — | — |
-| `by_horizontal` | ✅ (committed per name) | — | — | — |
-| `by_segment` / `by_branch` | — | — | — | — |
-| `top_contributors` | — | top-5 by committed | — | — |
-| `top_wapd_facility_contributors` | — | full list | — | — |
+| `by_industry` | ✅ (every industry, prefixed) | top-5 only | — | — |
+| `by_horizontal` | ✅ (every horizontal, plain + prefixed) | — | — | — |
+| `by_segment` / `by_branch` | counts only | — | — | — |
+| `top_contributors` | top-10 by committed (prefixed) | top-5 by committed | — | — |
+| `top_wapd_facility_contributors` | top-10 (prefixed) | full list | — | — |
 | `wapd_contributors_by_horizontal` | — | — | — | — (use `top_wapd_facilities` on the slice) |
 | `watchlist` | ✅ | ✅ | scoped (slice watchlist) | scoped (slice watchlist) |
-| `month_over_month` | — | counts only | — | — |
+| `month_over_month` | counts + top-3 events (prefixed) | counts only | — | — |
 | `industry_details` | — | — | ✅ (whole slice) | — |
 | `horizontal_details` | — | — | — | ✅ (whole slice) |
 

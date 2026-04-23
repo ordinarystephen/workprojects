@@ -274,13 +274,16 @@ def test_firm_level_renders_markers(cube):
     assert "Non-Investment Grade (exited)"        not in context
 
 
-# ── 11. firm_level verifiable_values keys stay plain ──────────
+# ── 11. firm_level verifiable_values keys stay marker-free ────
 
 def test_firm_level_verifiable_values_keys_are_plain(cube):
     """Per Option-A: lifecycle markers live in rendered context and
-    metric tile labels only — verifiable_values keys must be the plain
-    bucket names so the LLM can cite them and the verifier can resolve
-    citations. Decorating the keys would silently break verification."""
+    metric tile labels only — verifiable_values keys must NEVER carry
+    "(exited)" / "(new this period)" suffixes so the LLM can cite the
+    plain name and the verifier can resolve it. Round 18 widened the
+    surface (per-industry / per-horizontal / per-parent / per-driver
+    prefixed keys) but the marker-free invariant still holds.
+    """
     payload = slice_firm_level(cube)
     vv = payload["verifiable_values"]
     for key in vv.keys():
@@ -291,26 +294,58 @@ def test_firm_level_verifiable_values_keys_are_plain(cube):
         assert "(new this period)" not in key, (
             f"verifiable_values key carries '(new this period)' suffix: {key!r}."
         )
-    # The plain bucket labels MUST be present for citation resolution.
+
+    # Rating buckets (firm-level peer scope): plain keys.
     assert "Defaulted" in vv
     assert "Non-Rated" in vv
+
+    # Horizontals: both the plain backward-compat key and the new
+    # "Horizontal: <name> — Committed" canonical prefix must be present.
     assert "Leveraged Finance" in vv
     assert "Global Recovery Management" in vv
+    assert "Horizontal: Leveraged Finance — Committed" in vv
+    assert "Horizontal: Global Recovery Management — Committed" in vv
 
 
-# ── 12. firm_level metrics tiles carry markers ────────────────
+# ── 12. firm_level metrics tile panel locked to the spec ──────
 
-def test_firm_level_metrics_tiles_carry_markers(cube):
+def test_firm_level_metrics_tiles_match_spec(cube):
+    """Round 18 locks the firm-level tile panel to exactly 8 tiles in a
+    fixed order. Lifecycle markers no longer appear on tiles — markers
+    in the context still test in `test_firm_level_renders_markers`.
+    """
     payload = slice_firm_level(cube)
     metrics = payload["metrics"]
 
-    horizontal_labels = [tile["label"] for tile in metrics.get("Horizontal Portfolios", [])]
-    assert "Leveraged Finance (exited)"           in horizontal_labels
-    assert "Global Recovery Management (new this period)" in horizontal_labels
+    # Exactly one tile group, the firm-level overview.
+    assert len(metrics) == 1
+    (group_name,) = metrics.keys()
+    assert group_name.startswith("Firm-Level Overview")
 
-    rating_labels = [tile["label"] for tile in metrics.get("Rating Category Composition", [])]
-    assert "Defaulted (exited)"                   in rating_labels
-    assert "Non-Rated (new this period)"          in rating_labels
+    tiles = metrics[group_name]
+    assert len(tiles) == 8, f"expected 8 tiles, got {len(tiles)}"
+
+    expected_labels = [
+        "Total Limit",
+        "Total Take and Hold",
+        "Total Outstanding",
+        "Total Temporary Exposure",
+        "Weighted Average PD",
+        "Criticized & Classified",
+        "C&C (% of commitment)",
+        "Total Leveraged Commitment",
+    ]
+    actual_labels = [t["label"] for t in tiles]
+    assert actual_labels == expected_labels, (
+        f"tile order/labels diverged from spec.\n"
+        f"  expected: {expected_labels}\n"
+        f"  actual:   {actual_labels}"
+    )
+
+    # Tile groups removed by the Round 18 lockdown must NOT reappear.
+    assert "Horizontal Portfolios" not in metrics
+    assert "Rating Category Composition" not in metrics
+    assert "Watchlist" not in metrics
 
 
 # ── 13. Horizontal-portfolio sort: exits sink to bottom ───────
