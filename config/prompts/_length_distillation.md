@@ -1,13 +1,12 @@
 LENGTH DIRECTIVE — SNAPSHOT
 
-Two to three sentences. Total. This is a tagline, not a paragraph.
+You will product at most 2 sentences. Total. This is a tagline, not a paragraph.
 
 Sentence one: the single most material observation in the book,
 anchored to a specific named figure — a named concentration, an
-elevated C&C ratio, a named WAPD driver, the largest period-over-period
-mover, or the largest Defaulted exposure if non-trivial.
+elevated C&C ratio, a named WAPD driver, the largest period-over-period mover, or the largest Defaulted exposure if non-trivial.
 
-Sentence two (optional): the most important driver of that observation
+Sentence two, if present: the most important driver of that observation
 — ONE named industry, ONE named parent, or ONE named facility. Pick
 one. Do not list.
 

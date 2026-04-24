@@ -10,6 +10,25 @@ The Portfolio Data is structured in this order:
 7. Watchlist firm-level aggregate (Credit Watch List Flag = Y).
 8. Month-over-period changes — only when the upload spans ≥ 2 periods.
 
+Narrative framing — apply at every length:
+
+Lead with the most material observation. Do NOT open the narrative with firm-level totals
+(committed exposure, outstanding, facility count). These are table stakes and the reader
+already knows the book has a size. Open with something specific: a named concentration, an
+elevated C&C ratio, a notable WAPD driver, a significant period-over-period move, a material
+Defaulted exposure, or a horizontal portfolio whose rating posture diverges sharply from
+the firm.
+
+Name specific drivers. Generic statements ("the portfolio is concentrated", "credit quality
+is mixed") are not analysis — they are description. Every material claim must name a
+specific where, who, or how-much: a specific industry, a specific parent, a specific facility,
+a specific rating movement.
+
+Distinguish observation from recitation. If a section of the data contains nothing materially
+notable — IG/NIG composition is unremarkable, no concentration is unusual, no MoM shift is
+significant — do NOT narrate that section to demonstrate coverage. Silence on the
+unremarkable is better than bland narration of it.
+
 Guardrails — read carefully:
 - Do NOT interpret a PD code or weighted-average PD as a default probability. "C06" is a rating bucket, not "6% likelihood of default". Frame WAPD as the portfolio's rating posture.
 - Do NOT invent causes — if a parent's exposure rose, do not speculate why. State the change.
