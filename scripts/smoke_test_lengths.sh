@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Manual smoke test for the length toggle backend.
-# Requires: KRONOS server running locally (python server.py or gunicorn),
-#           a test workbook at ./smoke_test.xlsx (use your smoke fixture).
+# Fixed version: writes request body to temp file to avoid argv size limits.
 
-set -u  # error on undefined vars
+set -u
 
 BASE_URL="${KRONOS_URL:-http://localhost:5000}"
 FIXTURE="${KRONOS_FIXTURE:-./pipeline/tests/fixtures/smoke_lending.xlsx}"
@@ -15,14 +14,18 @@ if [[ ! -f "$FIXTURE" ]]; then
   exit 1
 fi
 
-# Encode the workbook as base64 (KRONOS expects this for JSON transport)
 FILE_B64=$(base64 < "$FIXTURE" | tr -d '\n')
 FILE_NAME=$(basename "$FIXTURE")
+
+# Temp directory for request bodies; cleaned up on exit
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
 
 run_test() {
   local label="$1"
   local length="$2"
   local expect_status="$3"
+  local body_file="$TMPDIR/body.json"
 
   echo ""
   echo "=========================================="
@@ -30,38 +33,42 @@ run_test() {
   echo "  length=$length, expected_status=$expect_status"
   echo "=========================================="
 
-  # Build request body
+  # Build request body to a file (avoids argv size limit)
   if [[ "$length" == "OMITTED" ]]; then
-    BODY=$(cat <<EOF
-{
-  "file_name": "$FILE_NAME",
-  "file_b64": "$FILE_B64",
-  "mode": "firm-level",
-  "parameters": {},
-  "prompt": "Firm-level smoke test"
+    python3 - "$FILE_NAME" "$FILE_B64" > "$body_file" <<'EOF'
+import json, sys
+file_name, file_b64 = sys.argv[1], sys.argv[2]
+body = {
+    "file_name": file_name,
+    "file_b64": file_b64,
+    "mode": "firm-level",
+    "parameters": {},
+    "prompt": "Firm-level smoke test",
 }
+print(json.dumps(body))
 EOF
-)
   else
-    BODY=$(cat <<EOF
-{
-  "file_name": "$FILE_NAME",
-  "file_b64": "$FILE_B64",
-  "mode": "firm-level",
-  "parameters": {},
-  "prompt": "Firm-level smoke test",
-  "length": "$length"
+    python3 - "$FILE_NAME" "$FILE_B64" "$length" > "$body_file" <<'EOF'
+import json, sys
+file_name, file_b64, length = sys.argv[1], sys.argv[2], sys.argv[3]
+body = {
+    "file_name": file_name,
+    "file_b64": file_b64,
+    "mode": "firm-level",
+    "parameters": {},
+    "prompt": "Firm-level smoke test",
+    "length": length,
 }
+print(json.dumps(body))
 EOF
-)
   fi
 
-  # Send request, capture status and body separately
+  # -d @file reads body from file instead of argv
   RESPONSE=$(curl -s -w "\n---STATUS---\n%{http_code}" \
     -X POST "$BASE_URL/upload" \
     -H "Content-Type: application/json" \
     -H "X-Kronos-Session: $SESSION_ID" \
-    -d "$BODY")
+    -d "@$body_file")
 
   STATUS=$(echo "$RESPONSE" | awk '/---STATUS---/{flag=1; next} flag')
   BODY_OUT=$(echo "$RESPONSE" | sed '/---STATUS---/,$d')
@@ -76,13 +83,11 @@ EOF
   fi
 
   if [[ "$STATUS" == "200" ]]; then
-    # Extract narrative and count chars
     NARRATIVE=$(echo "$BODY_OUT" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
-    narrative = data.get('narrative', '')
-    print(narrative)
+    print(data.get('narrative', ''))
 except Exception as e:
     print(f'JSON parse error: {e}', file=sys.stderr)
     sys.exit(1)
@@ -92,8 +97,8 @@ except Exception as e:
 
     echo "Narrative length: $CHAR_COUNT chars, ~$SENTENCE_COUNT sentences"
     echo ""
-    echo "First 300 chars:"
-    echo "${NARRATIVE:0:300}..."
+    echo "First 500 chars:"
+    echo "${NARRATIVE:0:500}..."
   else
     echo "Error response:"
     echo "$BODY_OUT" | head -10
@@ -105,7 +110,6 @@ echo "Base URL: $BASE_URL"
 echo "Fixture: $FIXTURE"
 echo "Session: $SESSION_ID"
 
-# The five tests
 run_test "1. Full length"          "full"         "200"
 run_test "2. Executive length"     "executive"    "200"
 run_test "3. Distillation length"  "distillation" "200"
