@@ -578,6 +578,49 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--accent-light);
 }
 
+/* ── Length toggle ───────────────────────────────────────────── */
+.length-toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.length-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.length-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.length-btn:hover:not(.active) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.length-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.length-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(28, 78, 216, 0.25);
+}
+
 .canned-title {
   font-size: 0.82rem;
   font-weight: 600;

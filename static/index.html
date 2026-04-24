@@ -33,6 +33,21 @@
         <!-- Transient inline notice (e.g. "Analysis cancelled.") -->
         <div class="inline-notice" id="inlineNotice" role="status" hidden></div>
 
+        <!-- Report length toggle. Default = full (set in HTML so first paint
+             matches the JS module-level activeLength). Sent on every /upload
+             (initial + follow-up) as the request-level `length` field. -->
+        <div class="length-toggle-row">
+          <div class="prompt-section-label">Report length</div>
+          <div class="length-toggle" role="radiogroup" aria-label="Report length" id="lengthToggle">
+            <button type="button" class="length-btn active"
+                    data-length="full" aria-pressed="true">Full Report</button>
+            <button type="button" class="length-btn"
+                    data-length="executive" aria-pressed="false">Executive Summary</button>
+            <button type="button" class="length-btn"
+                    data-length="distillation" aria-pressed="false">Snapshot</button>
+          </div>
+        </div>
+
         <!-- Quick Analysis -->
         <div class="prompt-section-label">Quick analysis</div>
         <div class="canned-grid" id="cannedGrid">

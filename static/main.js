@@ -79,6 +79,7 @@ const uploadError     = document.getElementById('uploadError');     // error str
 const uploadErrorText = document.getElementById('uploadErrorText'); // error message text
 
 const cannedGrid      = document.getElementById('cannedGrid');      // grid of quick-analysis buttons
+const lengthToggle    = document.getElementById('lengthToggle');    // 3-button length radiogroup
 const customPrompt    = document.getElementById('customPrompt');    // main textarea
 const promptHint      = document.getElementById('promptHint');      // inline hint / error in toolbar
 const runBtn          = document.getElementById('runBtn');          // Run Analysis button
@@ -110,6 +111,13 @@ let activeMode      = null;  // Mode slug from /modes (e.g. "firm-level").
 let activeParameters = {};   // Validated parameter values for the active mode.
                              // Populated by the (future) parameter picker UI for
                              // parameterized modes. Sent to /upload as 'parameters'.
+let activeLength    = 'full'; // Request-level length directive — one of
+                             // 'full' | 'executive' | 'distillation'. Bound to
+                             // the .length-toggle radiogroup. Read live at
+                             // submit time on both initial and follow-up
+                             // /upload, so changing the toggle between turns
+                             // takes effect on the next request. Default mirrors
+                             // the active class set in HTML so first paint matches.
 
 // Follow-up request lifecycle. Module-level so unrelated handlers
 // ("New Analysis", runAnalysis reset) can abort an in-flight request
@@ -242,6 +250,25 @@ function showInlineError(msg) {
   promptHint.style.color = 'var(--danger)';
   setTimeout(() => { promptHint.textContent = ''; promptHint.style.color = ''; }, 4000);
 }
+
+
+// ── Length Toggle ────────────────────────────────────────────
+// Three-button radiogroup that controls the request-level `length`
+// directive. Updates `activeLength`; both /upload call sites read
+// it live at submit time, so changing the toggle between turns
+// applies on the next request.
+lengthToggle.addEventListener('click', (e) => {
+  const btn = e.target.closest('.length-btn');
+  if (!btn || !lengthToggle.contains(btn)) return;
+  const next = btn.dataset.length;
+  if (!next || next === activeLength) return;
+  activeLength = next;
+  lengthToggle.querySelectorAll('.length-btn').forEach(b => {
+    const isActive = b === btn;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-pressed', String(isActive));
+  });
+});
 
 
 // ── Canned Prompts ────────────────────────────────────────────
@@ -467,6 +494,7 @@ async function runAnalysis() {
     resolvedUrl: uploadUrl,
     pageBaseURI: document.baseURI,
     mode: activeMode || '(none)',
+    length: activeLength,
     fileName: selectedFile?.name,
     fileSize: selectedFile?.size,
     promptLength: prompt.length,
@@ -493,6 +521,7 @@ async function runAnalysis() {
               prompt,
               mode: activeMode || '',
               parameters: activeParameters || {},
+              length: activeLength,
             }),
             signal: primarySignal,
           });
@@ -1307,6 +1336,7 @@ async function submitFollowup(question, inputEl) {
       pageBaseURI: document.baseURI,
       inheritedMode: inheritedMode || '(none)',
       inheritedParameters,
+      length: activeLength,
       hasPriorNarrative: !!lastNarrative,
       fileName: selectedFile?.name,
       promptLength: question.length,
@@ -1336,6 +1366,7 @@ async function submitFollowup(question, inputEl) {
           mode: inheritedMode,
           parameters: inheritedParameters,
           prior_narrative: lastNarrative,
+          length: activeLength,
         }),
         signal: followupController.signal,
       });
