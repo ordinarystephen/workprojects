@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Manual smoke test for the length toggle backend.
-# Fixed version: writes request body to temp file to avoid argv size limits.
+# v3: base64 lives in a temp file, never passed via argv.
 
 set -u
 
@@ -14,12 +14,13 @@ if [[ ! -f "$FIXTURE" ]]; then
   exit 1
 fi
 
-FILE_B64=$(base64 < "$FIXTURE" | tr -d '\n')
 FILE_NAME=$(basename "$FIXTURE")
-
-# Temp directory for request bodies; cleaned up on exit
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
+
+# Encode file once, write to disk. Python reads from disk.
+B64_FILE="$TMPDIR/file.b64"
+base64 < "$FIXTURE" | tr -d '\n' > "$B64_FILE"
 
 run_test() {
   local label="$1"
@@ -33,37 +34,33 @@ run_test() {
   echo "  length=$length, expected_status=$expect_status"
   echo "=========================================="
 
-  # Build request body to a file (avoids argv size limit)
-  if [[ "$length" == "OMITTED" ]]; then
-    python3 - "$FILE_NAME" "$FILE_B64" > "$body_file" <<'EOF'
-import json, sys
-file_name, file_b64 = sys.argv[1], sys.argv[2]
-body = {
-    "file_name": file_name,
-    "file_b64": file_b64,
-    "mode": "firm-level",
-    "parameters": {},
-    "prompt": "Firm-level smoke test",
-}
-print(json.dumps(body))
-EOF
-  else
-    python3 - "$FILE_NAME" "$FILE_B64" "$length" > "$body_file" <<'EOF'
-import json, sys
-file_name, file_b64, length = sys.argv[1], sys.argv[2], sys.argv[3]
-body = {
-    "file_name": file_name,
-    "file_b64": file_b64,
-    "mode": "firm-level",
-    "parameters": {},
-    "prompt": "Firm-level smoke test",
-    "length": length,
-}
-print(json.dumps(body))
-EOF
-  fi
+  # Write body via Python, reading base64 from file (no argv limit).
+  # File name and length are small enough to pass as argv.
+  FILE_NAME="$FILE_NAME" LENGTH="$length" B64_PATH="$B64_FILE" python3 > "$body_file" <<'PYEOF'
+import json
+import os
 
-  # -d @file reads body from file instead of argv
+file_name = os.environ["FILE_NAME"]
+length = os.environ["LENGTH"]
+b64_path = os.environ["B64_PATH"]
+
+with open(b64_path, "r") as f:
+    file_b64 = f.read()
+
+body = {
+    "file_name": file_name,
+    "file_b64": file_b64,
+    "mode": "firm-level",
+    "parameters": {},
+    "prompt": "Firm-level smoke test",
+}
+
+if length != "OMITTED":
+    body["length"] = length
+
+print(json.dumps(body))
+PYEOF
+
   RESPONSE=$(curl -s -w "\n---STATUS---\n%{http_code}" \
     -X POST "$BASE_URL/upload" \
     -H "Content-Type: application/json" \
