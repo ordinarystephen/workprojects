@@ -39,12 +39,14 @@ from pipeline.cube.lending import compute_lending_cube
 from pipeline.error_log import log_error, read_recent
 from pipeline.loaders.classifier import classify
 from pipeline.registry  import (
+    LengthError,
     ParameterError,
     RegistryError,
     get_mode,
     list_modes_for_ui,
     load_registry,
     resolve_parameter_options,
+    validate_length,
     validate_parameters,
 )
 from pipeline.tracking  import activate_mlflow, mlflow_run
@@ -311,6 +313,7 @@ def upload():
         file_name = (payload.get('file_name') or '').strip()
         parameters = payload.get('parameters') or {}
         prior_narrative = (payload.get('prior_narrative') or '').strip()
+        length_raw = payload.get('length')
 
         if not file_b64_str:
             return jsonify({"error": "No file uploaded."}), 400
@@ -333,6 +336,9 @@ def upload():
         prompt = request.form.get('prompt', '').strip()
         mode   = request.form.get('mode', '').strip()
         prior_narrative = request.form.get('prior_narrative', '').strip()
+        # Multipart sends `length` as a plain form field. Empty string /
+        # missing key both fall through validate_length() to the default.
+        length_raw = request.form.get('length')
         # Multipart parameters arrive as a JSON-encoded string in a
         # single form field — the form-data spec doesn't support
         # nested objects natively.
@@ -388,6 +394,24 @@ def upload():
                     stage="pre_validate",
                 )
                 return jsonify({"error": str(e)}), 400
+
+    # ── Step 3b: Validate length directive ─────────────────────
+    # Same shape as parameter validation: catch typos / unknown keys at
+    # the boundary and return a 400 with the valid-values list, before
+    # we open an MLflow run or do any analysis work. Empty / missing
+    # falls through to the default ("full"); only an unrecognized
+    # non-empty value raises.
+    try:
+        length = validate_length(length_raw)
+    except LengthError as e:
+        log_error(
+            "length_validation_failed",
+            error=e,
+            mode=mode,
+            session_id=_session_id(),
+            length=length_raw,
+        )
+        return jsonify({"error": str(e)}), 400
 
     # ── MLflow run wrapper ─────────────────────────────────────
     with mlflow_run(
@@ -478,6 +502,7 @@ def upload():
                 mode=mode,
                 parameters=parameters,
                 prior_narrative=prior_narrative,
+                length=length,
             )
         except Exception as e:
             traceback.print_exc()

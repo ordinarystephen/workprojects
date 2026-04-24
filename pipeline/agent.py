@@ -191,6 +191,11 @@ class State(BaseModel):
         # Empty on the first turn; populated on follow-ups so the LLM sees
         # what it said before. Plain text only — no structured claims or
         # verification metadata, matching how real prior conversation looks.
+    length: str = "full"       # request-level length directive — "full"
+        # (default) / "executive" / "distillation". Composed onto the base
+        # scope prompt by load_prompt() via compose_prompt(). Validated at
+        # the server.py boundary; by the time it reaches State it is one
+        # of the three known keys.
     narrative: str = ""        # final narrative text (set by narrate node)
     claims: list = Field(default_factory=list)  # final claims list
 
@@ -297,7 +302,7 @@ def _build_message_sequence(state: State) -> list:
     layered above this one.
     """
     mode_def = get_mode(state.mode) if state.mode else None
-    system_prompt = load_prompt(mode_def, state.parameters)
+    system_prompt = load_prompt(mode_def, state.parameters, state.length)
     user_question = state.messages[-1].content if state.messages else ""
 
     if state.prior_narrative:
@@ -429,6 +434,7 @@ def ask_agent(
     mode: str = "",
     parameters: dict | None = None,
     prior_narrative: str = "",
+    length: str = "full",
 ) -> dict:
     """
     Run the agent graph for a single /upload request.
@@ -448,6 +454,12 @@ def ask_agent(
                           When non-empty, the message sequence becomes
                           system → human(context) → ai(prior_narrative) →
                           human(user_prompt) — a true multi-turn shape.
+        length          : Request-level length directive — "full" (default),
+                          "executive", or "distillation". Composed onto the
+                          base scope prompt by load_prompt(). Caller (server.py)
+                          is responsible for validating via registry.validate_length
+                          before calling here; an unknown value will surface from
+                          the narrate node as a LengthError.
 
     Returns:
         dict:
@@ -472,6 +484,7 @@ def ask_agent(
         "mode":            mode,
         "parameters":      parameters or {},
         "prior_narrative": prior_narrative or "",
+        "length":          length,
     }
     result = graph.invoke(state_in)
     return {
@@ -525,14 +538,16 @@ class LangGraphResponsesAgent(ResponsesAgent):
             [i.model_dump() for i in request.input]
         )
 
-        # custom_inputs carries the KRONOS extras (context_data, mode)
-        # so they reach the narrate node. Defaults handle the case
-        # where a caller doesn't pass them.
+        # custom_inputs carries the KRONOS extras (context_data, mode,
+        # length) so they reach the narrate node. Defaults handle the
+        # case where a caller doesn't pass them. `length` defaults to
+        # "full" — the same default the State schema and ask_agent use.
         custom = request.custom_inputs or {}
         state_in = {
             "messages":     cc_msgs,
             "context_data": custom.get("context_data", ""),
             "mode":         custom.get("mode", ""),
+            "length":       custom.get("length", "full"),
         }
 
         for _, events in self.agent.stream(

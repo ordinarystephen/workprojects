@@ -16,7 +16,9 @@ from __future__ import annotations
 import unittest
 
 from pipeline.registry import (
+    LengthError,
     ParameterError,
+    compose_prompt,
     get_mode,
     list_active_modes,
     list_modes_for_ui,
@@ -99,6 +101,47 @@ class TestPromptLoading(unittest.TestCase):
         pl = get_mode("industry-portfolio-level")
         text = load_prompt(pl, {})
         self.assertIn("{{portfolio}}", text)
+
+
+class TestLengthComposition(unittest.TestCase):
+    def test_compose_prompt_default_appends_full_directive(self):
+        # Default length composes the Full Report directive with the
+        # literal "---" separator — the invariant server.py relies on
+        # for its system-prompt layout.
+        composed = compose_prompt("BASE")
+        self.assertTrue(composed.startswith("BASE\n\n---\n\n"))
+        self.assertIn("FULL REPORT", composed)
+
+    def test_compose_prompt_executive_picks_the_right_directive(self):
+        composed = compose_prompt("BASE", length="executive")
+        self.assertIn("EXECUTIVE SUMMARY", composed)
+        self.assertNotIn("FULL REPORT", composed)
+
+    def test_compose_prompt_distillation_picks_the_right_directive(self):
+        composed = compose_prompt("BASE", length="distillation")
+        self.assertIn("SNAPSHOT", composed)
+
+    def test_compose_prompt_unknown_length_raises(self):
+        # Unknown length must surface as a LengthError so server.py can
+        # return a 400 — silent fallback to "full" would hide UI bugs.
+        with self.assertRaises(LengthError):
+            compose_prompt("BASE", length="short")
+
+    def test_load_prompt_unknown_length_raises(self):
+        # load_prompt is the request-path entry point — same strict
+        # behavior as compose_prompt, inherited via delegation.
+        fl = get_mode("firm-level")
+        with self.assertRaises(LengthError):
+            load_prompt(fl, {}, length="bogus")
+
+    def test_load_prompt_default_length_applies_full_directive(self):
+        # Default length="full" means every current caller (server.py,
+        # agent.py) gets a Full Report composed onto the base prompt
+        # without needing a source change.
+        fl = get_mode("firm-level")
+        text = load_prompt(fl)
+        self.assertIn("firm-level portfolio snapshot", text)  # base preserved
+        self.assertIn("FULL REPORT", text)                    # directive composed
 
 
 if __name__ == "__main__":

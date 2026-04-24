@@ -99,8 +99,8 @@ Three things to notice:
   — every cube re-run must produce the same order so follow-up turns
   resolve the same labels.
 - **Disambiguating suffix** `(C&C)` on every label. Without it, an
-  industry name (e.g. `Energy`) could collide with the same label
-  published by `portfolio_summary` for committed exposure. See
+  industry name (e.g. `Energy`) could collide with another slicer's
+  bare-name label for the same industry. See
   [available-kris.md → Label-collision watch](available-kris.md#label-collision-watch).
 - **Skip percentage publication when the denominator is zero.**
   Don't publish `0%` as a verifiable value when the slicer hit a
@@ -302,11 +302,11 @@ Before publishing a new label, scan
 
 
 ### Label-form conventions across slicers
-Firm-wide slicers (firm_level) publish totals using bare labels: Committed Exposure, Outstanding Exposure, Criticized & Classified (SM + SS + Dbt + L). The context is entirely firm-wide, so "Total" is implicit.
-
-Summary slicers that juxtapose totals against slice-level figures (portfolio_summary) publish firm totals using explicit "Total" prefixes: Total Committed Exposure, Total Outstanding Exposure, Criticized & Classified exposure (SM + SS + Dbt + L). The "Total" prefix disambiguates firm-level aggregates from per-industry figures in the same context.
+Firm-wide slicers (firm_level) publish totals using bare labels: Committed Exposure, Outstanding Exposure, Criticized & Classified (SM + SS + Dbt + L). The context is entirely firm-wide, so "Total" is implicit. Cross-scope items in the same slicer (per-industry, per-horizontal, per-parent, per-WAPD-driver, per-MoM-event) carry a family prefix (e.g. `Industry: Energy — Committed`, `Top Parent: Acme — Committed`, `MoM: New originations count`).
 
 Per-slice slicers (industry_portfolio_level, horizontal_portfolio_level) use full prefix disambiguation (Industry Portfolio: <name> — Committed Exposure).
+
+If a future slicer juxtaposes firm-wide totals against slice-level figures in the same context, use explicit qualifiers ("Total ...", "Firm ...", etc.) on the firm-wide labels to disambiguate them from the per-slice figures.
 
 When adding a new slicer, pick the convention that matches the scope the slicer operates at:
 - If the entire context is one scope (firm-wide, or one slice), use bare labels or the slice prefix respectively.

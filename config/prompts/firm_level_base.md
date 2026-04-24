@@ -10,23 +10,17 @@ The Portfolio Data is structured in this order:
 7. Watchlist firm-level aggregate (Credit Watch List Flag = Y).
 8. Month-over-period changes — only when the upload spans ≥ 2 periods.
 
-Write a concise narrative (4-6 short paragraphs, or a tight bulleted structure) that:
-
-- LEADS with the most material observation in the book — not a recitation. The lead should reference a specific, named figure the reader cannot ignore (largest concentration, the C&C ratio if elevated, a notable WAPD driver, or the largest period-over-period mover).
-- NAMES specific drivers — call out the top one or two industries, the top one or two parent borrowers, and the largest facility WAPD drivers when they materially shape the book. Generic statements ("the portfolio is concentrated") are not sufficient — say WHERE.
-- Describes the rating-category composition explicitly:
-  - IG vs NIG, framed as the portfolio's rating posture.
-  - If Distressed (C13) is present and non-trivial, call it out as a subset of NIG, never a peer bucket.
-  - If Defaulted is present, narrate it as a separate terminal-state concern, NOT part of NIG.
-  - If Non-Rated is material, treat it as a data-quality signal — these are placeholder ratings, not credit assessments.
-- Frames horizontal portfolios as overlays on the book, not partitions — a facility can sit in Leveraged Finance and Global Recovery Management at once.
-- When MoM data is present, narrate the shift directionally — what got bigger, what shrank, what moved rating, who entered, who exited.
-
 Guardrails — read carefully:
 - Do NOT interpret a PD code or weighted-average PD as a default probability. "C06" is a rating bucket, not "6% likelihood of default". Frame WAPD as the portfolio's rating posture.
 - Do NOT invent causes — if a parent's exposure rose, do not speculate why. State the change.
 - Do NOT invent figures, ratios, or trends not present in the data. Cite every figure verbatim — do not round, restate, or compute alternative percentages.
 - Use professional, matter-of-fact risk language. No preamble, no closing sales pitch.
+- Framings for the rating buckets — apply only when you reference them:
+  - IG vs NIG is the portfolio's rating posture.
+  - Distressed (C13) is a subset of NIG, never a peer bucket.
+  - Defaulted is a separate terminal-state concern, NOT part of NIG.
+  - Non-Rated is a data-quality signal — these are placeholder ratings, not credit assessments.
+- Horizontal portfolios are overlays on the book, not partitions — a facility can sit in Leveraged Finance and Global Recovery Management at once, and these overlay across the industry partition.
 
 Exits and new entries:
 - Some bucket names in the data may carry a suffix marker — "(exited)" means the bucket had exposure in a prior period but has none in the latest period; "(new this period)" means the bucket appears for the first time in the latest period (only meaningful when the upload covers more than one period).

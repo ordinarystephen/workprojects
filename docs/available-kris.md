@@ -23,9 +23,9 @@ Each section corresponds to a cube field on
   integer), `date` (normalised ISO), `string` (case-insensitive),
   `weighted-average` (rendered as a string by the slicer).
 - **Meaning** — one-liner.
-- **Published by** — which active slicers expose it. The four active
-  slicers are `firm_level`, `portfolio_summary`,
-  `industry_portfolio_level`, `horizontal_portfolio_level`.
+- **Published by** — which active slicers expose it. The three active
+  slicers are `firm_level`, `industry_portfolio_level`,
+  `horizontal_portfolio_level`.
 
 Per-slice labels (industry / horizontal) carry a prefix
 (`Industry Portfolio: <name>` or `Horizontal Portfolio: <name>`)
@@ -60,8 +60,7 @@ data-quality signal.
 
 Source: [`LendingCube.firm_level`](../pipeline/cube/models.py),
 slicer: [`firm_level.py`](../pipeline/processors/lending/firm_level.py).
-Published by: `firm_level` (and many labels overlap with
-`portfolio_summary` — see notes below).
+Published by: `firm_level`.
 
 Round 18 widened firm_level's surface beyond firm vitals. The slicer
 now publishes per-industry, per-horizontal, per-parent, per-WAPD-driver,
@@ -74,32 +73,31 @@ prefix.
 | Label | Type | Meaning |
 |---|---|---|
 | `Distinct ultimate parents` | count | Unique top-of-hierarchy parents in the latest period. |
-| `Distinct partners` | count | Unique partners. **Firm-level only — `portfolio_summary` omits.** |
+| `Distinct partners` | count | Unique partners. |
 | `Distinct facilities` | count | Unique facilities. |
-| `Distinct risk assessment industries` | count | Industry buckets. **Firm-level form.** `portfolio_summary` publishes the same value under the shorter label `Distinct industries`. |
-| `Distinct branches` | count | Number of distinct branches (derived from `len(cube.by_branch)`). **firm_level only.** |
-| `Distinct segments` | count | Number of distinct portfolio segments (derived from `len(cube.by_segment)`). **firm_level only.** |
+| `Distinct risk assessment industries` | count | Industry buckets. |
+| `Distinct branches` | count | Number of distinct branches (derived from `len(cube.by_branch)`). |
+| `Distinct segments` | count | Number of distinct portfolio segments (derived from `len(cube.by_segment)`). |
 
 ### Exposure totals (currency)
 
 | Label | Meaning |
 |---|---|
-| `Committed Exposure` | Total committed across the firm. **`portfolio_summary` uses `Total Committed Exposure`** — distinct label, same number. |
-| `Outstanding Exposure` | Total outstanding. **`portfolio_summary` uses `Total Outstanding Exposure`.** |
-| `Take & Hold Exposure` | Firm-level only. |
-| `Temporary Exposure` | Firm-level only. |
-| `Approved Limit` | Firm-level only. |
+| `Committed Exposure` | Total committed across the firm. |
+| `Outstanding Exposure` | Total outstanding. |
+| `Take & Hold Exposure` | Firm-level take-and-hold exposure. |
+| `Temporary Exposure` | Firm-level temporary exposure. |
+| `Approved Limit` | Firm-level approved limit. |
 
 ### Regulatory-rating breakdown (currency)
 
 `Pass`, `Special Mention`, `Substandard`, `Doubtful`, `Loss`,
-`No Regulatory Rating`. Firm-level only — `portfolio_summary` doesn't
-republish these line items.
+`No Regulatory Rating`.
 
 | Label | Type | Meaning |
 |---|---|---|
-| `Criticized & Classified (SM + SS + Dbt + L)` | currency | Firm-level form. **`portfolio_summary` uses `Criticized & Classified exposure (SM + SS + Dbt + L)`** — distinct label, same number. |
-| `C&C as % of commitment` | percentage | Available on both `firm_level` and `portfolio_summary`. |
+| `Criticized & Classified (SM + SS + Dbt + L)` | currency | Firm-level criticized + classified total. |
+| `C&C as % of commitment` | percentage | C&C divided by total commitment. |
 
 ### Weighted averages
 
@@ -240,10 +238,8 @@ Source: [`LendingCube.by_ig_status`](../pipeline/cube/models.py)
 
 | Label | Type | Published by |
 |---|---|---|
-| `Investment Grade` | currency | `firm_level`, `portfolio_summary` |
-| `Non-Investment Grade` | currency | `firm_level`, `portfolio_summary` |
-| `Investment Grade (% of rated commitment)` | percentage | `portfolio_summary` only |
-| `Non-Investment Grade (% of rated commitment)` | percentage | `portfolio_summary` only |
+| `Investment Grade` | currency | `firm_level` |
+| `Non-Investment Grade` | currency | `firm_level` |
 
 The `% of rated commitment` denominator is `IG + NIG` — Defaulted and
 Non-Rated are excluded from the denominator. Legacy semantic, preserved
@@ -258,8 +254,7 @@ Source: [`LendingCube.by_defaulted`](../pipeline/cube/models.py)
 
 | Label | Type | Published by |
 |---|---|---|
-| `Defaulted` | currency | `firm_level`, `portfolio_summary` |
-| `Defaulted (% of total commitment)` | percentage | `portfolio_summary` only |
+| `Defaulted` | currency | `firm_level` |
 
 ---
 
@@ -271,8 +266,7 @@ placeholder PD code — `NON_RATED_TOKENS`).
 
 | Label | Type | Published by |
 |---|---|---|
-| `Non-Rated` | currency | `firm_level`, `portfolio_summary` |
-| `Non-Rated (% of total commitment)` | percentage | `portfolio_summary` only |
+| `Non-Rated` | currency | `firm_level` |
 
 ---
 
@@ -285,9 +279,8 @@ C13 rows.
 
 | Label | Type | Published by |
 |---|---|---|
-| `Distressed (of which)` | currency | `firm_level`, `portfolio_summary` |
-| `Distressed facility count` | count | `firm_level`, `portfolio_summary` |
-| `Distressed (% of NIG)` | percentage | `portfolio_summary` only |
+| `Distressed (of which)` | currency | `firm_level` |
+| `Distressed facility count` | count | `firm_level` |
 
 Always cite this as "of which" relative to NIG — never as a peer bucket.
 
@@ -317,14 +310,12 @@ section below.
 Source: [`LendingCube.by_industry`](../pipeline/cube/models.py)
 (keyed by industry name).
 
-| Label | Type | Published by |
-|---|---|---|
-| `<industry name>` | currency | `portfolio_summary` (top-5 only) |
-| `<industry name> (% of total commitment)` | percentage | `portfolio_summary` (top-5 only) |
-
-Industries outside the top 5 are in the cube but **unverifiable** at
-firm-summary scope. To narrate a non-top-5 industry, run the
-`industry-portfolio-level` mode against it.
+**`firm_level` publishes every industry under the prefixed labels
+documented in the firm_level "Industry breakdown" section above
+(`Industry: <name> — Committed`, etc.). The bare `<industry name>`
+key at this level is no longer published by any active slicer.** To
+narrate a single industry in depth, run the `industry-portfolio-level`
+mode against it.
 
 ---
 
@@ -345,10 +336,10 @@ Source: [`LendingCube.top_contributors`](../pipeline/cube/models.py)
 — top-10 parents by committed / outstanding / WAPD numerator /
 C&C exposure.
 
-| Label | Type | Published by |
-|---|---|---|
-| `<parent name>` | currency (committed) | `portfolio_summary` (top-5 only, by committed) |
-| `<parent name> (% of total commitment)` | percentage | `portfolio_summary` (top-5 only) |
+**`firm_level` publishes the top-10 parents under the prefixed labels
+documented in its "Top-10 parent borrowers" section above
+(`Top Parent: <parent> — Committed`, etc.). The bare `<parent name>`
+key is no longer published by any active slicer.**
 
 Other contributor sort orders (outstanding / WAPD / CC) are
 cube-only — not yet published.
@@ -364,12 +355,12 @@ Source:
 For each facility, four parallel labels are published. `<facility>` is
 the facility name (or facility id when the name is missing).
 
-| Label | Type | Published by |
-|---|---|---|
-| `<facility> (committed)` | currency | `portfolio_summary` |
-| `<facility> (WAPD numerator)` | currency | `portfolio_summary` |
-| `<facility> (share of firm WAPD numerator)` | percentage | `portfolio_summary` |
-| `<facility> (implied PD)` | percentage | `portfolio_summary` |
+**`firm_level` publishes the top-10 facility-level WAPD drivers under
+the prefixed labels documented in its
+"Top-10 facility-level WAPD drivers" section above
+(`WAPD Driver: <facility> — Committed`, etc.). The bare
+`<facility> (committed)` / `<facility> (WAPD numerator)` parenthetical
+forms are no longer published by any active slicer.**
 
 `implied PD` = numerator ÷ committed for the facility (decimal).
 
@@ -395,8 +386,8 @@ firm-level Credit Watch List Flag = "Y" aggregate.
 
 | Label | Type | Published by |
 |---|---|---|
-| `Watchlist facility count` | count | `firm_level`, `portfolio_summary` |
-| `Watchlist committed exposure` | currency | `firm_level`, `portfolio_summary` |
+| `Watchlist facility count` | count | `firm_level` |
+| `Watchlist committed exposure` | currency | `firm_level` |
 
 Per-slice watchlist labels are prefixed — see per-slice section.
 
@@ -407,19 +398,12 @@ Per-slice watchlist labels are prefixed — see per-slice section.
 Source: [`LendingCube.month_over_month`](../pipeline/cube/models.py)
 — populated only when ≥ 2 periods are uploaded.
 
-Counts only — the underlying `RatingChange` / `FacilityChange` /
-`ExposureMover` lists are cube-only and not individually citable.
-
-| Label | Type | Published by |
-|---|---|---|
-| `New originations` | count | `portfolio_summary` |
-| `Exits` | count | `portfolio_summary` |
-| `New parent relationships` | count | `portfolio_summary` |
-| `Parent relationships exited` | count | `portfolio_summary` |
-| `PD rating downgrades` | count | `portfolio_summary` |
-| `PD rating upgrades` | count | `portfolio_summary` |
-| `Regulatory rating downgrades` | count | `portfolio_summary` |
-| `Regulatory rating upgrades` | count | `portfolio_summary` |
+**`firm_level` publishes MoM aggregates and per-facility events under
+prefixed labels — see the "Month-over-period — firm_level" section
+above for the full set (`MoM: New originations count`, `MoM: Exits
+count`, `MoM PD Change: <facility> — From`, etc.). The bare counts
+listed in earlier rounds are no longer published by any active
+slicer.**
 
 ---
 
@@ -554,43 +538,41 @@ prevents this:
   this doc to confirm the local label is unique within the slicer's
   scope.
 
-When in doubt, add a parenthetical disambiguator (see
-`portfolio_summary`'s `<facility> (committed)` /
-`<facility> (WAPD numerator)` pair).
+When in doubt, add a parenthetical disambiguator or carry a family
+prefix (e.g. `firm_level`'s `WAPD Driver: <facility> — Committed` /
+`WAPD Driver: <facility> — WAPD numerator` pair).
 
 ---
 ### Label-form conventions across slicers
-Firm-wide slicers (firm_level) publish totals using bare labels: Committed Exposure, Outstanding Exposure, Criticized & Classified (SM + SS + Dbt + L). The context is entirely firm-wide, so "Total" is implicit.
-
-Summary slicers that juxtapose totals against slice-level figures (portfolio_summary) publish firm totals using explicit "Total" prefixes: Total Committed Exposure, Total Outstanding Exposure, Criticized & Classified exposure (SM + SS + Dbt + L). The "Total" prefix disambiguates firm-level aggregates from per-industry figures in the same context.
+Firm-wide slicers (firm_level) publish totals using bare labels: Committed Exposure, Outstanding Exposure, Criticized & Classified (SM + SS + Dbt + L). The context is entirely firm-wide, so "Total" is implicit. Cross-scope items (per-industry, per-horizontal, per-parent, per-WAPD-driver, per-MoM-event) carry a family prefix — see the firm_level section above.
 
 Per-slice slicers (industry_portfolio_level, horizontal_portfolio_level) use full prefix disambiguation (Industry Portfolio: <name> — Committed Exposure).
 
 When adding a new slicer, pick the convention that matches the scope the slicer operates at:
 - If the entire context is one scope (firm-wide, or one slice), use bare labels or the slice prefix respectively.
-- If the slicer juxtaposes multiple scopes (firm + slices, or slice + sub-slices), use explicit qualifiers ("Total ...", "Firm ...", etc.) to disambiguate.
+- If the slicer juxtaposes multiple scopes (firm + slices, or slice + sub-slices), use explicit qualifiers ("Total ...", "Firm ...", etc.) or family prefixes to disambiguate.
 ---
 
 ## Quick map: cube field → publishing slicers
 
-| Cube field | `firm_level` | `portfolio_summary` | `industry_portfolio_level` | `horizontal_portfolio_level` |
-|---|:-:|:-:|:-:|:-:|
-| `firm_level` totals/counts | ✅ (+ branch/segment counts) | ✅ | — (uses for share-of-firm only) | — (same) |
-| `by_ig_status` | ✅ | ✅ | via `industry_details` | via `horizontal_details` |
-| `by_defaulted` | ✅ | ✅ | via `industry_details` | via `horizontal_details` |
-| `by_non_rated` | ✅ | ✅ | via `industry_details` | via `horizontal_details` |
-| `nig_distressed_substats` | ✅ | ✅ (+ `% of NIG`) | via `industry_details` | via `horizontal_details` |
-| `by_industry` | ✅ (every industry, prefixed) | top-5 only | — | — |
-| `by_horizontal` | ✅ (every horizontal, plain + prefixed) | — | — | — |
-| `by_segment` / `by_branch` | counts only | — | — | — |
-| `top_contributors` | top-10 by committed (prefixed) | top-5 by committed | — | — |
-| `top_wapd_facility_contributors` | top-10 (prefixed) | full list | — | — |
-| `wapd_contributors_by_horizontal` | — | — | — | — (use `top_wapd_facilities` on the slice) |
-| `watchlist` | ✅ | ✅ | scoped (slice watchlist) | scoped (slice watchlist) |
-| `month_over_month` | counts + top-3 events (prefixed) | counts only | — | — |
-| `industry_details` | — | — | ✅ (whole slice) | — |
-| `horizontal_details` | — | — | — | ✅ (whole slice) |
+| Cube field | `firm_level` | `industry_portfolio_level` | `horizontal_portfolio_level` |
+|---|:-:|:-:|:-:|
+| `firm_level` totals/counts | ✅ (+ branch/segment counts) | — (uses for share-of-firm only) | — (same) |
+| `by_ig_status` | ✅ | via `industry_details` | via `horizontal_details` |
+| `by_defaulted` | ✅ | via `industry_details` | via `horizontal_details` |
+| `by_non_rated` | ✅ | via `industry_details` | via `horizontal_details` |
+| `nig_distressed_substats` | ✅ | via `industry_details` | via `horizontal_details` |
+| `by_industry` | ✅ (every industry, prefixed) | — | — |
+| `by_horizontal` | ✅ (every horizontal, plain + prefixed) | — | — |
+| `by_segment` / `by_branch` | counts only | — | — |
+| `top_contributors` | top-10 by committed (prefixed) | — | — |
+| `top_wapd_facility_contributors` | top-10 (prefixed) | — | — |
+| `wapd_contributors_by_horizontal` | — | — | — (use `top_wapd_facilities` on the slice) |
+| `watchlist` | ✅ | scoped (slice watchlist) | scoped (slice watchlist) |
+| `month_over_month` | counts + top-3 events (prefixed) | — | — |
+| `industry_details` | — | ✅ (whole slice) | — |
+| `horizontal_details` | — | — | ✅ (whole slice) |
 
 Empty cells are either (a) future-mode territory (`by_segment`) or (b)
-deliberately scoped out of the slicer (e.g. `firm_level` doesn't list
-top contributors — that's `portfolio_summary`'s job).
+deliberately scoped out of the slicer (e.g. per-slice slicers don't
+republish firm-wide aggregates beyond the share-of-firm denominator).

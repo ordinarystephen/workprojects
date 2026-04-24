@@ -15,6 +15,20 @@
 > `config/modes.yaml`, `config/prompts/*.md`.
 >
 > **Date:** 2026-04-22
+>
+> **Amendment (Round 19, 2026-04-24):** the `portfolio_summary` slicer
+> referenced throughout this audit was deprecated and removed in
+> Round 19 as part of the Scope × Length refactor — the executive
+> summary view is now produced by running the `firm_level` mode with
+> the request-level `length` field set to `executive`. References
+> below to `portfolio_summary` (as a slicer, prompt template, mode
+> slug, or set of `verifiable_values` labels) reflect the codebase
+> *as of 2026-04-22* and have been preserved verbatim because this
+> document is a point-in-time historical audit. Findings about
+> `portfolio_summary`-only labels (e.g. `(% of rated commitment)`,
+> `(% of total commitment)`, `(% of NIG)`, `New originations` count,
+> `Exits` count, etc.) no longer apply to any active slicer; consult
+> [available-kris.md](available-kris.md) for the current label set.
 
 ---
 

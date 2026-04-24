@@ -5,6 +5,32 @@ entry below documents intent, the concrete cube/slicer shape, and the remaining
 work before the mode can flip from `status: placeholder` to `status: active` in
 `config/modes.yaml`.
 
+> **Amendment (Round 19, 2026-04-24):** the `portfolio_summary` slicer
+> referenced in §4 ("Path B cube collapse") and §"Standardize label forms
+> across slicers" was deprecated and removed in Round 19 as part of the
+> Scope × Length refactor. The executive summary view is now produced by
+> running the `firm_level` mode with the request-level `length` field set
+> to `executive`. Two consequences for this doc:
+>
+> 1. **Path B caller list is reduced.** `firm_level` is now the only
+>    slicer reading `cube.by_industry` / `cube.by_horizontal`, so the
+>    Path B collapse becomes a single-caller migration.
+> 2. **The label-divergence table no longer reflects the codebase.** The
+>    forms in the `portfolio_summary` column (`Total Committed
+>    Exposure`, `Distinct industries`, etc.) no longer exist. The
+>    immediate divergence is gone; the section is retained as
+>    forward-planning context for any future slicer that juxtaposes
+>    firm-wide totals against slice-level figures and would benefit
+>    from a "Total ..." or "Firm ..." prefix convention.
+>
+> The YAML reservation `lengths: []` (mentioned in "Reserved sections in
+> the YAML") is **separate from** the request-level `length` field
+> introduced in Round 19. Request-level `length` is per-`/upload`
+> payload and modulates only the prompt directive concatenated to the
+> base prompt; the YAML `lengths: []` reservation remains for a future
+> *synthesis-template* length spec (full report / executive briefing /
+> quick update at the synthesis layer). The two are orthogonal.
+
 ---
 
 ## Industry vs Horizontal Portfolios — the distinction

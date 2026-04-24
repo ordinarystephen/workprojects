@@ -38,22 +38,7 @@ modes:
       a percentage of commitment.
     parameters: []
     cube_slice: firm_level
-    prompt_template: firm_level.md
-    status: active
-
-  - slug: portfolio-summary
-    display_name: Portfolio Summary
-    description: >
-      Health overview & key indicators. Executive view of overall
-      portfolio health, including IG/NIG mix, top concentrations,
-      WAPD drivers, and period-over-period movement.
-    user_prompt: >
-      Provide an executive summary of the overall portfolio health.
-      Highlight key risk indicators, credit quality trends, and any
-      areas requiring immediate attention.
-    parameters: []
-    cube_slice: portfolio_summary
-    prompt_template: portfolio_summary.md
+    prompt_template: firm_level_base.md
     status: active
 
   # ── Parameterized portfolio modes ─────────────────────────────
@@ -90,7 +75,7 @@ modes:
         required: true
         display_label: Industry Portfolio
     cube_slice: industry_portfolio_level
-    prompt_template: industry_portfolio_level.md
+    prompt_template: industry_portfolio_level_base.md
     status: active
 
   - slug: horizontal-portfolio-level
@@ -113,7 +98,7 @@ modes:
         required: true
         display_label: Horizontal Portfolio
     cube_slice: horizontal_portfolio_level
-    prompt_template: horizontal_portfolio_level.md
+    prompt_template: horizontal_portfolio_level_base.md
     status: active
 
   # ── Parameterized placeholders (slicers pending) ──────────────
@@ -236,7 +221,15 @@ modes:
 # this refactor.
 syntheses: []
 
-# Reserved for a future iteration. Length directives modify synthesis
-# output length (full report, executive briefing, quick update). Not
-# implemented in this refactor.
+# Reserved for a future iteration. Length directives modify SYNTHESIS
+# output length (full report, executive briefing, quick update for a
+# multi-mode synthesis document). Not implemented in this refactor.
+#
+# IMPORTANT — orthogonal to the request-level `length` field added in
+# the Scope × Length refactor (Round 19). The request-level `length`
+# is a per-/upload payload field — "full" | "executive" | "distillation",
+# default "full" — composed onto a single mode's base prompt by
+# pipeline/registry.py::compose_prompt(). The YAML `lengths:`
+# reservation below is for synthesis-template length specs at the
+# synthesis layer, a different concern. Do not conflate the two.
 lengths: []

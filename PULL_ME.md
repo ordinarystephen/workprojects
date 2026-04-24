@@ -340,3 +340,150 @@ Flagged on `_weighted_average()` docstring in `pipeline/cube/lending.py`. Before
 - Part 2 of the audit-fix series: unclassified-dim buckets in `_grouping_by_dim`.
 - Rendering `by_horizontal × Distressed` or similar cross-cuts.
 - Multi-period history for `DistressedSubstats` (currently latest-period only).
+
+---
+
+## Round 19 — Phase 1 of Scope × Length refactor: deprecate `portfolio_summary`
+
+Commit: _see `git log` on branch `kronos`_
+
+First of five phases that decouple the *scope* of an analysis (firm_level / industry_portfolio_level / horizontal_portfolio_level) from the *length* of its narrative (full report / executive summary / snapshot). The executive-summary view that `portfolio_summary` produced will be reproduced in subsequent phases by running the `firm_level` mode with a request-level `length=executive` directive composed onto the base prompt. **No code or data semantics change in this round** — Phase 1 is the demolition pass that removes the slicer, its prompt, its registry import, and its mode entry, and refactors the docs to match.
+
+- [ ] `pipeline/processors/lending/portfolio_summary.py` — **DELETED.**
+- [ ] `config/prompts/portfolio_summary.md` — **DELETED.**
+- [ ] `pipeline/registry.py` — removed the `import pipeline.processors.lending.portfolio_summary  # noqa: F401` line that triggered slicer self-registration. App boot would crash at import otherwise.
+- [ ] `config/modes.yaml` — removed the `portfolio-summary` mode block. `GET /modes` no longer surfaces the button; the UI Quick Analysis grid silently drops it on next page load (frontend renders from the registry list, no hard-coded mode strings).
+- [ ] `docs/available-kris.md` — surgically edited (live reference doc — every `portfolio_summary`-only label and dual-publish row removed; bare-name `<industry name>` / `<parent name>` / `<facility>` rows replaced with pointers to firm_level's prefixed labels; cube→slicer matrix column dropped). No portfolio_summary references remain.
+- [ ] `docs/adding-a-mode.md` — example label-collision callout re-pointed at "another slicer's bare-name label"; label-form-conventions section dropped the portfolio_summary "Total ..." example and re-framed it as forward-planning guidance for any future slicer that juxtaposes scopes.
+- [ ] `docs/calculation-audit.md` — top-of-doc amendment footnote noting the slicer was deprecated in Round 19; **content preserved verbatim** (point-in-time audit; per project convention, amend, don't erase).
+- [ ] `docs/future-work.md` — top-of-doc amendment footnote: (a) Path B caller list reduced to firm_level only, (b) the label-divergence table no longer reflects the codebase but is retained as forward-planning context, (c) explicit clarification that the YAML reserved `lengths: []` (synthesis-template length spec) is **orthogonal** to the request-level `length` field that Phase 3 will introduce.
+- [ ] `CLAUDE.md` — architecture tree drops the `portfolio_summary.py` line and `portfolio_summary.md` prompt line; "Currently wired modes" table drops the `portfolio-summary` row; `mode` routing example flipped to `"firm-level"`; `kronos.mode` MLflow tag example flipped to `firm-level`; `error_log` `mode=` example flipped to `firm-level`; YAML `modes:` example flipped from `portfolio-summary` to `firm-level`. New Round 19 entry in the Done section explains Phase 1 and explicitly documents the YAML `lengths: []` ≠ request-level `length` distinction.
+
+### YAML reservation vs request-level `length` (one-time clarification)
+
+Two unrelated concepts share the word "length":
+
+1. **YAML `lengths: []`** in `config/modes.yaml` — reserved alongside `syntheses: []` for a future *synthesis-template* length spec at the synthesis layer (full report / executive briefing / quick update for a multi-mode synthesis document that composes outputs from several scopes into one). **Untouched by this refactor.**
+2. **Request-level `length` field** (added in Phase 3) — per-`/upload` payload, `"full" | "executive" | "distillation"`, default `"full"`. Modulates which length-directive markdown gets concatenated onto the *base* prompt for a single-mode narration. Does not touch the data payload, the slicer, the cube, or the YAML registry.
+
+Both can coexist — the YAML reservation governs synthesis layout, the request-level field governs single-mode narration length. Don't conflate them when reading future round notes.
+
+### Behavior change
+
+- The "Portfolio Summary" button vanishes from the Quick Analysis grid on next page load.
+- Any in-flight UI sessions that still have the button rendered (cached page) will receive `mode_not_implemented` on click, which the existing error log captures via the `mode_not_implemented` event-type slug. No 500 — the request fails fast before the slicer dispatch.
+- All other modes (`firm-level`, `industry-portfolio-level`, `horizontal-portfolio-level`, parameterized placeholders, plain placeholders) are unchanged.
+
+### Compatibility
+
+- App boot validates the mode registry against the slicer registry at import time (`pipeline/registry.py::load_registry`). Removing the slicer module and the YAML block in the same commit keeps the cross-check happy.
+- No DB / cube / classifier / template changes — purely registry + docs.
+- `GET /modes` response is one entry shorter; frontend reads it dynamically with no schema assumptions about which slugs exist.
+
+### Test plan (Phase 1 only)
+
+- `python -m pytest pipeline/tests/` — full suite must pass. Registry test (`test_registry.py`) cross-checks that every YAML `cube_slice:` resolves to a registered slicer and every `prompt_template:` file exists; both invariants hold after deletion.
+- Manual smoke: load the app, confirm the Quick Analysis grid no longer renders the Portfolio Summary button, confirm the other modes still run end-to-end.
+
+### Phases 2–5 follow
+
+- **Phase 2** — split each scope prompt into base + length directives (`_length_full.md`, `_length_executive.md`, `_length_distillation.md`); composition helper concatenates `base + "\n\n---\n\n" + directive`.
+- **Phase 3** — add request-level `length` field to `/upload` payload; validate against `("full", "executive", "distillation")`; default `"full"`; update `load_prompt(mode, parameters, length="full")`.
+- **Phase 4** — UI length toggle with three buttons ("Full Report", "Executive Summary", "Snapshot"); follow-ups read live `activeLength`.
+- **Phase 5** — verify all tests pass + run 9 scope×length combos confirming data payload identical across lengths within scope, narrative differs in length.
+
+---
+
+## Round 19 — Phase 2 of Scope × Length refactor: split scope prompts, add length directives, compose helper
+
+Commit: _see `git log` on branch `kronos`_
+
+Phase 2 of five. Each active scope prompt is now split into a scope-bound `*_base.md` file plus three orthogonal length directives (`_length_full.md`, `_length_executive.md`, `_length_distillation.md`) that get concatenated onto the base by `compose_prompt(base, length)`. The directives are functionally distinct framings, not longer/shorter copies of each other:
+
+- **Full Report** — comprehensive write-up; every Portfolio Data section with material content earns coverage; sections covered in materiality order, not source order.
+- **Executive Summary** — signal density over completeness; lead + 2-3 paragraphs that name only items materially changing the read on the book; explicitly omit the unremarkable.
+- **Snapshot (distillation)** — 2-3 sentences total; one material observation + one driver; no preamble, no hedging, no second findings; "say nothing remarkable and stop" if the book is genuinely unremarkable.
+
+Existing behaviour is preserved end-to-end: `load_prompt(mode, parameters)` defaults `length="full"` so callers (server.py, agent.py) that don't yet pass a length get the same composed prompt they would get from the pre-refactor `firm_level.md`. Phase 3 will wire the request-level `length` field through the upload payload.
+
+- [ ] `config/prompts/_length_full.md` — **NEW.** Full Report directive (comprehensive coverage in materiality order; every claim names a where, who, or how much).
+- [ ] `config/prompts/_length_executive.md` — **NEW.** Executive Summary directive (signal density; omit the unremarkable; explicit INCLUDE/OMIT examples; ~half a Full Report length).
+- [ ] `config/prompts/_length_distillation.md` — **NEW.** Snapshot directive (2-3 sentences total; no preamble; no hedging; explicit "if you can't name a finding, say so and stop").
+- [ ] `config/prompts/firm_level_base.md` — **NEW.** Scope-bound firm-level base. Carries the role line ("firm-level portfolio snapshot" preserved verbatim), the Portfolio Data section enumeration, the Guardrails (with the Distressed-as-subset / Defaulted-as-terminal / Non-Rated-as-data-quality / horizontals-as-overlay framings relocated INTO Guardrails as universal rules — they apply across all three lengths), the exits/new-entries semantics, and the Claims emission protocol with the full source_field examples list. The structural "Write a concise narrative (4-6 paragraphs)" body section was REMOVED — that content is now expressed by the length directives.
+- [ ] `config/prompts/industry_portfolio_level_base.md` — **NEW.** Same split treatment for the industry-portfolio scope. Adds an explicit Guardrails framing that {{portfolio}} is a partition element (not an overlay), so the LLM never confuses it with a horizontal.
+- [ ] `config/prompts/horizontal_portfolio_level_base.md` — **NEW.** Same split treatment for the horizontal-portfolio scope. Adds an explicit Guardrails framing that {{portfolio}} is an overlay (not a partition) and overlaps with industry portfolios and other horizontals by design.
+- [ ] `config/prompts/firm_level.md` — **DELETED.** Superseded by `firm_level_base.md` + length directive composition.
+- [ ] `config/prompts/industry_portfolio_level.md` — **DELETED.** Superseded by `industry_portfolio_level_base.md`.
+- [ ] `config/prompts/horizontal_portfolio_level.md` — **DELETED.** Superseded by `horizontal_portfolio_level_base.md`.
+- [ ] `config/modes.yaml` — three `prompt_template:` references updated (`firm_level.md` → `firm_level_base.md`, etc.). Reserved `lengths: []` comment block extended with an explicit one-paragraph clarification that the YAML reservation is for synthesis-template length specs and is **orthogonal** to the per-/upload request-level `length` field this refactor introduces.
+- [ ] `pipeline/registry.py` — added `compose_prompt(base, length="full")` helper that concatenates `base + "\n\n---\n\n" + directive`. Updated `load_prompt(mode, parameters, length="full")` signature with the new keyword arg defaulting to `"full"` so existing callers (`pipeline/agent.py::_build_message_sequence`) keep working unchanged. **Strict validation:** unknown `length` values raise a new `LengthError(ValueError)` exception (not silent fallback) — server.py turns these into 400s in Phase 3 so a typo from the UI surfaces to the caller instead of being silently normalised to "full". Missing length-directive files on disk are caught at app startup by a new `_validate_length_directives()` call inside `load_registry()` (raises `RegistryError` listing each missing file with its absolute path) — this is treated as a deployment bug, not a runtime condition to recover from. Default-fallback path (no mode / placeholder mode → `default.md`) intentionally skips length composition since length variation isn't meaningful for the no-mode case. Module docstring + public-API banner updated to document both new functions and the YAML-vs-request-level orthogonality.
+- [ ] `pipeline/tests/test_registry.py` — added a `TestLengthComposition` class with six tests: default composition picks Full Report and includes the literal `---` separator; explicit `length="executive"` and `length="distillation"` pick the right directives and exclude the others; unknown length raises `LengthError` from both `compose_prompt` and `load_prompt`; default `load_prompt(fl)` produces a system prompt that contains both the preserved base substring ("firm-level portfolio snapshot") and the composed directive marker ("FULL REPORT").
+
+### Behaviour change
+
+- No user-facing behaviour change in this round. `load_prompt(mode, parameters)` keeps composing a Full Report directive onto the base prompt by default, which produces a system prompt slightly different in *layout* (base + `---` + directive) but equivalent in *content* to the pre-refactor monolithic prompts. The LLM's narrative will be near-identical to before; minor wording shifts are possible because the directive's "lead with the most material observation" framing is now syntactically separate from the base.
+- Phase 3 wires the request-level `length` field through `/upload`; only then does flipping to "Executive Summary" or "Snapshot" actually change the narration shape.
+
+### Compatibility
+
+- All existing `load_prompt` call sites (server.py, agent.py, tests) work unchanged because `length` is a keyword arg with a default.
+- Existing tests still pass — `test_active_mode_prompt_loads` still asserts "firm-level portfolio snapshot" appears in the loaded firm-level prompt (preserved verbatim in `firm_level_base.md`); `test_parameter_substitution` still verifies `{{portfolio}}` substitution against `industry_portfolio_level_base.md`.
+- Full pytest suite: 74/74 passing in 0.98s (six new `TestLengthComposition` tests added alongside the existing 68).
+
+### Files for the Domino sync
+
+When you pull this round into Domino:
+- Add the six new prompt files (`_length_*.md` × 3 and `*_base.md` × 3) to `config/prompts/`.
+- Delete the three superseded prompt files (`firm_level.md`, `industry_portfolio_level.md`, `horizontal_portfolio_level.md`).
+- Replace `config/modes.yaml` and `pipeline/registry.py`.
+
+### Phases 3–5 follow
+
+- **Phase 3** — add request-level `length` field to `/upload` payload (server.py); validate against `("full", "executive", "distillation")`; default `"full"`; thread through `pipeline/agent.py::_build_message_sequence` into `load_prompt(mode, parameters, length=...)`. Follow-up requests inherit the original turn's length unless overridden.
+- **Phase 4** — UI length toggle with three buttons ("Full Report", "Executive Summary", "Snapshot"); default "Full Report"; follow-ups read live `activeLength`.
+- **Phase 5** — verify all tests pass + run 9 scope×length combos confirming data payload identical across lengths within scope, narrative differs in length.
+
+---
+
+## Round 19 — Phase 3 of Scope × Length refactor: wire `length` end-to-end through /upload
+
+Commit: _see `git log` on branch `kronos`_
+
+Phase 3 of five. Threads the request-level `length` field through the full request path: `/upload` payload → `validate_length()` → `ask_agent(length=...)` → `State.length` → `_build_message_sequence` → `load_prompt(mode, parameters, length)` → `compose_prompt(base, length)`. Both transports (`application/json` and `multipart/form-data`) accept the field with identical semantics: empty / missing falls through to the default (`"full"`); any value not in `("full", "executive", "distillation")` returns 400 with the valid-values list in the message body. **No UI change in this round** — the field is opt-in for callers; the existing UI keeps sending no `length` and continues to receive Full Report narratives. Phase 4 adds the toggle.
+
+- [ ] `pipeline/registry.py` — added `validate_length(length)` public helper for request-time validation. Returns the cleaned length string ("full" by default for None / empty input), trims whitespace, is case-sensitive on purpose, and raises the existing `LengthError` (added in Phase 2) with the full sorted list of valid keys in the message. Caller pattern documented in the docstring matches the existing `validate_parameters` → `ParameterError` → 400 shape so server.py can wire it identically.
+- [ ] `pipeline/agent.py` — added `length: str = "full"` field to `State` (alongside `prior_narrative`); added `length: str = "full"` kwarg to `ask_agent()` (positioned after `prior_narrative` so existing positional-arg call sites continue to work); threaded `length` into the `state_in` dict; updated `_build_message_sequence()` to call `load_prompt(mode_def, state.parameters, state.length)` so the composed prompt picks up the requested directive. `LangGraphResponsesAgent.predict_stream` also reads `length` from `request.custom_inputs` (default `"full"`) so a future MLflow-served deployment behaves the same way.
+- [ ] `server.py` — imported `LengthError` and `validate_length` from `pipeline.registry`. Both transports now extract `length_raw` from the payload (JSON: `payload.get('length')`; multipart: `request.form.get('length')`). Validation runs as a new "Step 3b" right after parameter pre-validation, before the MLflow run wrapper opens — so an invalid length never opens an MLflow run, never reaches `analyze()`, and never bills LLM time. `LengthError` is mapped to a 400 response with the message from `validate_length` (which already includes the offending value and the sorted valid-values list) and emits a new `length_validation_failed` event into the JSONL error log via `pipeline/error_log.py`. The validated `length` is then passed as a kwarg to the `ask_agent(...)` call inside the LLM-narration step.
+- [ ] `pipeline/tests/test_upload_length.py` — **NEW.** 10 integration tests across two `unittest.TestCase` classes (`TestUploadLengthJson` × 7, `TestUploadLengthMultipart` × 3). Pattern: Flask test client + `unittest.mock.patch.object(server, "analyze", ...)` + `patch.object(server, "ask_agent", side_effect=spy)` so the test exercises the request boundary without real workbook parsing or Azure OpenAI calls; the spy captures `ask_agent`'s kwargs so each test asserts what `length` server forwarded. Coverage: (1) valid lengths reach `ask_agent` verbatim — `full`, `executive`, `distillation` for JSON; `executive` for multipart; (2) invalid lengths return 400 with the message containing the offending value AND every valid key (`'short'` for JSON; `'bogus'` for multipart) AND `ask_agent` is never called; (3) omitted / empty `length` defaults to `"full"` (both transports); (4) case-sensitivity pin — `"Full"` returns 400, locking out future silent-lowercasing refactors. Module-level `pytest.importorskip("mlflow") + pytest.importorskip("langgraph")` plus an explicit probe for `mlflow.types.responses.ResponsesAgentRequest` (mlflow 3.x only) so the suite skips cleanly on local Python 3.9 dev environments and runs on Domino's Python 3.10+ environment.
+
+### Behaviour change
+
+- New `/upload` accepted field: `length` (string, optional, one of `"full" | "executive" | "distillation"`, default `"full"`). Backward-compatible — clients that omit the field receive the same Full Report behaviour as before.
+- New 400 response shape for typos: `{"error": "Unknown length 'short'. Valid values: ['distillation', 'executive', 'full']."}`. Mirrors the existing `parameter_validation_failed` 400 shape so frontend error handling can be uniform.
+- New JSONL error event-type slug: `length_validation_failed`. Captured fields: `mode`, `length` (the raw value the user sent), session id, error class + message. Bounded: no narrative text, no file contents.
+
+### Compatibility
+
+- `ask_agent()` signature gained `length="full"` as the last kwarg — purely additive. Existing callers (server.py upgraded in this round; tests previously calling `ask_agent` keep working) are unaffected.
+- `State.length` defaults to `"full"`, so any code path that builds `State` without specifying length (legacy callers, tests) gets the same prompt composition as before.
+- `LangGraphResponsesAgent.predict_stream` now also reads `length` from `custom_inputs` — additive; missing key defaults to `"full"`.
+- Full pytest suite: **74 passing + 1 skipped** locally (the new test_upload_length.py module skips on Python 3.9 because mlflow 3.x requires 3.10+; on Domino it should run all 10 tests). Expected post-pull suite total: **84 passing** on Python 3.10+.
+
+### Files for the Domino sync
+
+- Replace `pipeline/registry.py` (`validate_length` helper + module imports unchanged from Phase 2 otherwise).
+- Replace `pipeline/agent.py` (State + ask_agent + _build_message_sequence + predict_stream).
+- Replace `server.py` (imports + length extract + Step 3b validation + ask_agent kwarg).
+- Add `pipeline/tests/test_upload_length.py`.
+
+### Manual smoke checks (Domino, after pull)
+
+1. `POST /upload` with current UI payload → 200, narrative unchanged. (Default length path.)
+2. `curl -X POST .../upload -F file=@... -F prompt="..." -F mode=firm-level -F length=executive` → 200, shorter narrative than (1).
+3. Same curl with `-F length=bogus` → 400 with `Unknown length 'bogus'. Valid values: ['distillation', 'executive', 'full'].`
+4. Repeat (2) and (3) via JSON transport (`Content-Type: application/json`, `length: "executive"` / `length: "bogus"` in body) — same outcomes.
+5. Tail `logs/kronos-errors.jsonl` after step 3/4 → one record with `event_type: length_validation_failed`.
+
+### Phase 4 follows
+
+UI length toggle (`Full Report` / `Executive Summary` / `Snapshot`) above mode-selection; default `Full Report`; follow-ups read live `activeLength`. The backend is now ready — Phase 4 only touches `static/main.js`, `static/index.html`, `static/styles.css`.

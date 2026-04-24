@@ -35,7 +35,16 @@
 #       (raises ParameterError on missing/unknown/invalid)
 #   register_slicer(name, required_params=[])  -> decorator
 #   get_slicer(name)                           -> dict | None
-#   load_prompt(mode, parameters={})           -> str
+#   load_prompt(mode, parameters={}, length="full")  -> str
+#   compose_prompt(base, length="full")        -> str
+#       (raises LengthError on unknown length)
+#
+# Length directives (Round 19, Scope × Length refactor):
+# `length` is the request-level length field — one of "full" /
+# "executive" / "distillation" — composed onto a scope-bound base
+# prompt via compose_prompt(). Orthogonal to the YAML `lengths:`
+# reservation in config/modes.yaml (which is reserved for synthesis-
+# template length specs at a different layer).
 # ──────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -63,6 +72,15 @@ class ParameterError(ValueError):
     """Raised at request time when an /upload payload's parameters
     don't match the mode's parameter schema. server.py turns these
     into 400s with the message body."""
+
+
+class LengthError(ValueError):
+    """Raised at request time when an /upload payload's `length` field
+    is not one of the recognized length-directive keys. server.py
+    should turn these into 400s with the message body (same pattern
+    as ParameterError). Missing directive files on disk are a
+    deployment bug, not a request-time condition — caught at app
+    startup by load_registry(), not here."""
 
 
 # ══════════════════════════════════════════════════════════════
@@ -153,6 +171,16 @@ _MODES_PATH    = _REPO_ROOT / "config" / "modes.yaml"
 _PROMPTS_DIR   = _REPO_ROOT / "config" / "prompts"
 _DEFAULT_PROMPT = "default.md"
 
+# ── Length directives ─────────────────────────────────────────
+# Request-level length field added in the Scope × Length refactor.
+# Orthogonal to the YAML `lengths:` reservation.
+_DEFAULT_LENGTH = "full"
+_LENGTH_DIRECTIVE_FILES: dict[str, str] = {
+    "full":         "_length_full.md",
+    "executive":    "_length_executive.md",
+    "distillation": "_length_distillation.md",
+}
+
 _REGISTRY: Optional[Registry] = None
 _BY_SLUG: dict[str, ModeDefinition] = {}
 
@@ -171,7 +199,6 @@ def load_registry() -> Registry:
     # this function so the registry can be reloaded in tests
     # without import-order surprises.
     import pipeline.processors.lending.firm_level                 # noqa: F401
-    import pipeline.processors.lending.portfolio_summary          # noqa: F401
     import pipeline.processors.lending.industry_portfolio_level   # noqa: F401
     import pipeline.processors.lending.horizontal_portfolio_level # noqa: F401
 
@@ -204,6 +231,13 @@ def load_registry() -> Registry:
     for m in registry.modes:
         _validate_mode(m)
 
+    # Registry-wide length-directive validation. Every file in
+    # _LENGTH_DIRECTIVE_FILES must exist on disk — compose_prompt()
+    # assumes this invariant at request time, and a missing directive
+    # is a deployment bug we want to fail loudly at startup, not
+    # discover when a user clicks "Snapshot" in the UI.
+    _validate_length_directives()
+
     _REGISTRY = registry
     _BY_SLUG = {m.slug: m for m in registry.modes}
     log.info(
@@ -213,6 +247,27 @@ def load_registry() -> Registry:
         sum(1 for m in registry.modes if m.status == "placeholder"),
     )
     return registry
+
+
+def _validate_length_directives() -> None:
+    """Startup check: every file named in _LENGTH_DIRECTIVE_FILES must
+    exist on disk. Raises RegistryError with the full list of missing
+    files so a deployment pull that forgot a directive fails the app
+    at boot instead of the next /upload with length != 'full'.
+
+    Called from load_registry() once per process."""
+    missing: list[str] = []
+    for length, fname in _LENGTH_DIRECTIVE_FILES.items():
+        path = _PROMPTS_DIR / fname
+        if not path.exists():
+            missing.append(f"{length!r} -> {path}")
+    if missing:
+        raise RegistryError(
+            "Length directive files missing from disk: "
+            + "; ".join(missing)
+            + ". compose_prompt() assumes every entry in "
+            "_LENGTH_DIRECTIVE_FILES resolves at request time."
+        )
 
 
 def _validate_mode(mode: ModeDefinition) -> None:
@@ -422,20 +477,106 @@ def validate_parameters(
 # ── Prompt loading + parameter substitution ───────────────────
 # ══════════════════════════════════════════════════════════════
 
-def load_prompt(mode: Optional[ModeDefinition], parameters: Optional[dict] = None) -> str:
-    """Read the prompt template for a mode and substitute parameter values.
+def validate_length(length: Optional[str]) -> str:
+    """Request-time validation for the /upload `length` field.
+
+    Returns the cleaned length string ("full" / "executive" /
+    "distillation"). Trims whitespace and substitutes the default
+    ("full") when the input is None or empty — which covers the
+    "field omitted" case. Any other value raises LengthError with
+    the full list of valid keys in the message so server.py can
+    surface a 400 the UI can read directly.
+
+    Case-sensitive on purpose. The UI sends one of the three known
+    strings; bouncing typos loud (rather than silently lowercasing
+    "Executive" or normalising "exec" to "executive") makes new UI
+    surfaces fail noisily during integration instead of producing
+    surprising narrative shapes in production.
+
+    Caller pattern (server.py):
+        try:
+            length = validate_length(payload.get('length'))
+        except LengthError as e:
+            return jsonify({"error": str(e)}), 400
+    """
+    raw = (length or "").strip()
+    if not raw:
+        return _DEFAULT_LENGTH
+    if raw not in _LENGTH_DIRECTIVE_FILES:
+        valid = sorted(_LENGTH_DIRECTIVE_FILES.keys())
+        raise LengthError(
+            f"Unknown length {raw!r}. Valid values: {valid}."
+        )
+    return raw
+
+
+def compose_prompt(base: str, length: str = _DEFAULT_LENGTH) -> str:
+    """Concatenate a length directive onto a base scope prompt.
+
+    `length` must be one of "full" / "executive" / "distillation" —
+    the request-level length field (orthogonal to the YAML `lengths:`
+    reservation in config/modes.yaml, which is for synthesis-template
+    length specs at a different layer).
+
+    Raises LengthError on any unknown length value. Server.py maps this
+    to a 400 so a typo surfaces to the caller rather than being silently
+    normalised to "full" — invisible auto-correction of caller input
+    hides bugs and makes UI rollouts untestable.
+
+    Missing directive files on disk are NOT handled here — they're a
+    deployment bug and are caught at app startup by load_registry().
+    By the time compose_prompt runs, every directive file in
+    _LENGTH_DIRECTIVE_FILES is guaranteed to exist. A defensive
+    FileNotFoundError is raised if somehow one vanishes between
+    startup and request time (shouldn't happen outside of someone
+    deleting a file on a running server).
+
+    Composition format: `base + "\\n\\n---\\n\\n" + directive`. The
+    literal `---` separator is a visual divider in the system prompt
+    so the LLM treats the directive as an addendum to the base.
+    """
+    fname = _LENGTH_DIRECTIVE_FILES.get(length)
+    if fname is None:
+        valid = sorted(_LENGTH_DIRECTIVE_FILES.keys())
+        raise LengthError(
+            f"Unknown length {length!r}. Valid values: {valid}."
+        )
+    directive_path = _PROMPTS_DIR / fname
+    directive = directive_path.read_text()
+    return f"{base}\n\n---\n\n{directive}"
+
+
+def load_prompt(
+    mode: Optional[ModeDefinition],
+    parameters: Optional[dict] = None,
+    length: str = _DEFAULT_LENGTH,
+) -> str:
+    """Read the prompt template for a mode, substitute parameter values,
+    and append the requested length directive.
+
+    `length` is the request-level length field — "full" (default),
+    "executive", or "distillation". Composition is delegated to
+    compose_prompt(), which raises LengthError on unknown values.
+    The default value preserves pre-Round-19 behaviour for callers
+    that haven't been updated yet (Phase 3 wires the field through
+    server.py and pipeline/agent.py).
 
     If `mode` is None or has no `prompt_template`, falls back to
-    config/prompts/default.md. Substitution is plain `{{name}}` →
-    `value` text replacement, no Jinja, no expressions."""
+    config/prompts/default.md without composing a length directive —
+    the default fallback is used by placeholder modes / no-mode requests
+    where length variation is not meaningful. Substitution is plain
+    `{{name}}` → `value` text replacement, no Jinja, no expressions."""
     if _REGISTRY is None:
         load_registry()
 
     template_name: str
+    use_default_fallback: bool
     if mode is not None and mode.prompt_template:
         template_name = mode.prompt_template
+        use_default_fallback = False
     else:
         template_name = _DEFAULT_PROMPT
+        use_default_fallback = True
 
     path = _PROMPTS_DIR / template_name
     if not path.exists():
@@ -443,8 +584,12 @@ def load_prompt(mode: Optional[ModeDefinition], parameters: Optional[dict] = Non
         # mode that points at a missing prompt. Fall back rather than crash.
         log.warning("Prompt template '%s' not found; using default.", template_name)
         path = _PROMPTS_DIR / _DEFAULT_PROMPT
+        use_default_fallback = True
 
     text = path.read_text()
     for k, v in (parameters or {}).items():
         text = text.replace("{{" + k + "}}", str(v))
-    return text
+
+    if use_default_fallback:
+        return text
+    return compose_prompt(text, length)
