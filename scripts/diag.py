@@ -63,3 +63,23 @@ print()
 print("First 10 verifiable_values keys:")
 for key in list(verifiable_values.keys())[:10]:
     print(f"  '{key}'")
+
+results = verification.get("claim_results") or []
+print("All FAILING claim results:")
+for r in results:
+    if r.get("status") != "verified":
+        idx = r.get("claim_index", -1)
+        if 0 <= idx < len(claims):
+            source_field = claims[idx].get("source_field", "(missing)")
+            cited = claims[idx].get("cited_value", "(missing)")
+        else:
+            source_field = "(unknown)"
+            cited = "(unknown)"
+        print(f"  claim_index={idx}")
+        print(f"    source_field: {source_field}")
+        print(f"    cited_value: {cited}")
+        print(f"    status: {r.get('status')}")
+        print(f"    reason: {r.get('reason')}")
+        print(f"    expected: {r.get('expected')}")
+        print(f"    actual: {r.get('actual')}")
+        print()
