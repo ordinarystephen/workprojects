@@ -68,6 +68,11 @@ FIXTURE_PATH = Path(os.environ.get(
     "KRONOS_FIXTURE",
     str(_REPO_ROOT / "pipeline" / "tests" / "fixtures" / "smoke_lending.xlsx"),
 ))
+# Optional overrides so the diagnostic can target the same slice the user
+# originally observed the variability against. Empty / unset → fall back
+# to the alphabetical-first option returned by /cube/parameter-options.
+INDUSTRY_OVERRIDE   = os.environ.get("KRONOS_INDUSTRY",   "").strip() or None
+HORIZONTAL_OVERRIDE = os.environ.get("KRONOS_HORIZONTAL", "").strip() or None
 INDUSTRY_RUNS = 3
 LENGTH = "full"
 HTTP_TIMEOUT = 180  # seconds — LLM calls can take 30-60s on Azure
@@ -181,7 +186,10 @@ def _compute_slicer_dump(file_bytes: bytes, mode_slug: str, parameters: dict) ->
     slicer = get_slicer(mode_def.cube_slice)
     if slicer is None:
         raise RuntimeError(f"Slicer {mode_def.cube_slice!r} not registered")
-    return slicer["fn"](cube, parameters)
+    # Match analyze.py:124-127 — slicers take individual kwargs, not a dict.
+    if parameters:
+        return slicer["fn"](cube, **parameters)
+    return slicer["fn"](cube)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -307,10 +315,39 @@ def main():
         sys.exit(3)
     if not horizontal_list:
         print("[WARN] No horizontal options resolved — horizontal step will be skipped.")
-    chosen_industry   = industry_list[0]
-    chosen_horizontal = horizontal_list[0] if horizontal_list else None
-    print(f"  Industry choice  (alphabetical first): {chosen_industry!r}")
-    print(f"  Horizontal choice (alphabetical first): {chosen_horizontal!r}")
+
+    # Honour env overrides so the diagnostic can target the original
+    # failure case (the user reported variability for Information
+    # Technology specifically). If the override doesn't appear in the
+    # cube's option list, exit loudly — silently picking a different
+    # slice would defeat the purpose of running this.
+    if INDUSTRY_OVERRIDE is not None:
+        if INDUSTRY_OVERRIDE not in industry_list:
+            print(f"[FATAL] KRONOS_INDUSTRY={INDUSTRY_OVERRIDE!r} not in fixture's industry list.")
+            print(f"        Available: {industry_list}")
+            sys.exit(3)
+        chosen_industry = INDUSTRY_OVERRIDE
+        industry_pick_reason = "override (KRONOS_INDUSTRY)"
+    else:
+        chosen_industry = industry_list[0]
+        industry_pick_reason = "alphabetical first"
+
+    if HORIZONTAL_OVERRIDE is not None:
+        if HORIZONTAL_OVERRIDE not in horizontal_list:
+            print(f"[FATAL] KRONOS_HORIZONTAL={HORIZONTAL_OVERRIDE!r} not in fixture's horizontal list.")
+            print(f"        Available: {horizontal_list}")
+            sys.exit(3)
+        chosen_horizontal = HORIZONTAL_OVERRIDE
+        horizontal_pick_reason = "override (KRONOS_HORIZONTAL)"
+    elif horizontal_list:
+        chosen_horizontal = horizontal_list[0]
+        horizontal_pick_reason = "alphabetical first"
+    else:
+        chosen_horizontal = None
+        horizontal_pick_reason = "n/a (no horizontals in fixture)"
+
+    print(f"  Industry choice   [{industry_pick_reason}]:   {chosen_industry!r}")
+    print(f"  Horizontal choice [{horizontal_pick_reason}]: {chosen_horizontal!r}")
     print(f"  All industries  ({len(industry_list)}): {industry_list}")
     print(f"  All horizontals ({len(horizontal_list)}): {horizontal_list}")
 

@@ -505,7 +505,11 @@ Diagnostic-only round. Adds a single stdlib-only Python script that captures eve
    ```bash
    python3 scripts/diag_perslice.py > diag_perslice.out 2>&1
    ```
-   Optional: `KRONOS_URL=http://...` / `KRONOS_FIXTURE=/path/to/your.xlsx`.
+   Optional env overrides:
+   - `KRONOS_URL=http://...` (default `http://localhost:5000`)
+   - `KRONOS_FIXTURE=/path/to/your.xlsx` (default `pipeline/tests/fixtures/smoke_lending.xlsx`)
+   - `KRONOS_INDUSTRY="Information Technology"` (default: alphabetical first)
+   - `KRONOS_HORIZONTAL="Leveraged Finance"` (default: alphabetical first)
 3. Paste `diag_perslice.out` back.
 
 ### Exit codes
