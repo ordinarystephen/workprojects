@@ -526,3 +526,51 @@ Diagnostic-only round. Adds a single stdlib-only Python script that captures eve
 ### Cleanup
 
 - Delete `scripts/diag_perslice.py` once the investigation lands a fix and the script is no longer useful, OR keep it as a generic per-slice variability probe (small, self-contained, no server dependency beyond the existing endpoints).
+
+---
+
+## Round 21 — Sync per-slice prompt examples to slicer's actual label conventions
+
+Commit: _see `git log` on branch `kronos`_
+
+Phase C of the verification-variability investigation (Rounds 19/20). The Round 20 diagnostic confirmed the H3 hypothesis: the unstable claims on `industry-portfolio-level` were all facility-level WAPD drivers where the LLM improvised an em-dash + parent-name convention (e.g. `F004 Term Loan — parent Delta Co — implied PD`) that doesn't match the slicer's actual parenthesised label format (e.g. `F004 Term Loan (implied PD)`). The fix is structural: prompt examples now match the slicer's published `verifiable_values` keys verbatim.
+
+- [ ] `config/prompts/industry_portfolio_level_base.md` — rewrote the Claims block with three explicit label conventions:
+  1. Slice-level KRIs / rating buckets — bare metric name (`<prefix> — Committed Exposure`).
+  2. Parent contributors — parent name alone, NO metric suffix (`<prefix> — Acme Corp` resolves to committed; share has its own `(% of slice commitment)` variant).
+  3. Facility-level WAPD drivers — facility name with metric in parentheses (`<prefix> — F100 Term Loan (committed)`, `(WAPD numerator)`, `(share of slice WAPD numerator)`, `(implied PD)`).
+  Added a CORRECT facility-WAPD-driver example, plus three INCORRECT examples each with a one-line "# wrong because" explanation: multi-figure packing (single claim with comma-separated values), the `— parent <name>` insertion the LLM was making (display text bleeding into source_field), and the old `— Acme Corp — Committed` pattern (regression guard). Also dropped the `— Committed` suffix from the CORRECT parent example so the prompt example matches what the slicer publishes.
+- [ ] `config/prompts/horizontal_portfolio_level_base.md` — applied the **same restructure** the industry prompt got this morning (the morning rewrite never reached this file). Same three conventions, same CORRECT and INCORRECT examples, with `Horizontal Portfolio:` prefix and the parens-on-facility convention. Added a horizontal-specific INCORRECT example for the multi-figure-packing failure the diagnostic surfaced (`<prefix> — Distinct ultimate parents, Distinct facilities` cited as `'2, 2'`).
+- [ ] `firm_level_base.md` — **not touched.** Different label families (`Industry: <name> — Committed`, `Top Parent: <name>`, `WAPD Driver: <name>`, `MoM: <metric>`, etc., per Round 18). Out of scope for this diagnostic-driven fix.
+
+### Diagnostic-driven evidence
+
+From the Round 20 diagnostic (`diag_perslice.py` × 3 runs):
+
+| Run | Claims | Verified | Failed |
+|---|---|---|---|
+| 1 | 21 | 17 | 4 (all facility WAPD with `— parent <name>`) |
+| 2 | 23 | 17 | 6 (4 same as above + 2 with extra `— numerator` / `— implied PD` em-dash suffixes) |
+| 3 | 21 | 17 | 4 (same as run 1) |
+
+`context_sent` was byte-identical across all three runs (sha256 collision) — H1 (slicer non-determinism) ruled out. `verified_count` rock-solid at 17 — the verifying claims line up with the slicer's actual labels. The four-to-six unstable failures were all facility-level cite-format improvisations.
+
+Horizontal × 1 run: 6 claims, 4 verified, 2 failed — both failures were multi-figure packing (e.g. `'Horizontal Portfolio: GRM — Distinct ultimate parents, Distinct facilities'` cited as `'2, 2'`). Horizontal hadn't received this morning's industry prompt rewrite; this round catches it up.
+
+### Behaviour change
+
+- LLM should now stop inserting `— parent <Parent name>` into facility-level `source_field` values. Verification rate on facility-WAPD-driver claims should jump from ~0% to high (~80%+; some Azure-OpenAI-temp-0.0 jitter on which exact metrics get cited per call is expected and is H5 — minor and unrelated).
+- Horizontal prompt should stop emitting comma-separated multi-figure `source_field` values.
+- No code, slicer, cube, or registry change. No data semantics change. Existing verified claims continue to verify (the slice-level KRI labels in the new prompt are identical to what the LLM was already citing correctly).
+
+### Verification protocol
+
+- Re-run `scripts/diag_perslice.py > diag_perslice.out 2>&1` after the pull.
+- Expect: industry × 3 runs each show 0 (or near-0) `field_not_found` failures with `— parent` suffixes in the source_field. Verified count should rise from 17/21–23 to 21–23/21–23 (all or nearly-all verified).
+- Expect: horizontal × 1 run shows 0 multi-figure-packed `source_field` values; verified rate on the small horizontal claim set rises to all-clear.
+
+### Files for the Domino sync
+
+- Replace `config/prompts/industry_portfolio_level_base.md`.
+- Replace `config/prompts/horizontal_portfolio_level_base.md`.
+- (Optional) leave `scripts/diag_perslice.py` in place to re-run for confirmation; can delete after verification.

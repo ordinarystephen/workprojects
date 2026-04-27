@@ -27,38 +27,74 @@ produces four claims. A sentence that cites zero figures produces zero claims.
 Do NOT pack multiple cited_values into a single claim's cited_value string. Do NOT 
 use a single source_field to represent multiple labels.
 
-**Example — CORRECT emission for a sentence citing multiple figures:**
+source_field must match a label from the Portfolio Data verbatim. The slicer publishes 
+a fixed catalog of labels — your source_field must match one exactly. Industry-scoped 
+labels are prefixed "Industry Portfolio: {{portfolio}} —" to disambiguate them from 
+firm-level figures.
 
-Sentence: "The top three parents by committed exposure are Acme Corp ($562.88), Beta 
-Industries ($539.74), and Gamma Holdings ($412.30)."
+**Label conventions — three patterns, read carefully:**
 
-Claims:
-  { source_field: "Industry Portfolio: {{portfolio}} — Acme Corp — Committed",       cited_value: "$562.88" }
-  { source_field: "Industry Portfolio: {{portfolio}} — Beta Industries — Committed", cited_value: "$539.74" }
-  { source_field: "Industry Portfolio: {{portfolio}} — Gamma Holdings — Committed",  cited_value: "$412.30" }
+1. Slice-level KRIs and rating buckets — bare metric name after the prefix:
+    - "Industry Portfolio: {{portfolio}} — Committed Exposure"
+    - "Industry Portfolio: {{portfolio}} — Outstanding Exposure"
+    - "Industry Portfolio: {{portfolio}} — Investment Grade"
+    - "Industry Portfolio: {{portfolio}} — Distressed (of which)"
+    - "Industry Portfolio: {{portfolio}} — Defaulted"
+2. Parent contributors — parent name alone, NO metric suffix:
+    - "Industry Portfolio: {{portfolio}} — Acme Corp"               (resolves to committed)
+    - "Industry Portfolio: {{portfolio}} — Acme Corp (% of slice commitment)"
+3. Facility-level WAPD drivers — facility name with metric in parentheses:
+    - "Industry Portfolio: {{portfolio}} — F100 Term Loan (committed)"
+    - "Industry Portfolio: {{portfolio}} — F100 Term Loan (WAPD numerator)"
+    - "Industry Portfolio: {{portfolio}} — F100 Term Loan (share of slice WAPD numerator)"
+    - "Industry Portfolio: {{portfolio}} — F100 Term Loan (implied PD)"
 
-**Example — INCORRECT emission (do NOT do this):**
+The context display reads "F100 Term Loan — parent Delta Co: ..." for readability, 
+but the verifiable label does NOT include "— parent <name>". Cite the facility name 
+only.
 
-  { source_field: "Industry Portfolio: {{portfolio}} — Top 5 parents by committed exposure",
-    cited_value: "$562.88, $539.74, $412.30" }
-
-This is wrong because a single claim can only verify a single value against a single label.
-
-source_field must match a label from the Portfolio Data verbatim. Industry-scoped labels 
-are prefixed "Industry Portfolio: {{portfolio}} —" to disambiguate them from firm-level 
-figures. Examples:
-- "Industry Portfolio: {{portfolio}} — Committed Exposure"
-- "Industry Portfolio: {{portfolio}} — Investment Grade"
-- "Industry Portfolio: {{portfolio}} — Distressed (of which)"
-- "Industry Portfolio: {{portfolio}} — <Parent name>"
-
-Rating-category shares within the industry use the "(% of rated commitment)" suffix for 
-IG/NIG, "(% of slice commitment)" for Defaulted/Non-Rated, and "(% of NIG)" for the 
+Rating-category shares use the "(% of rated commitment)" suffix for IG/NIG, 
+"(% of slice commitment)" for Defaulted/Non-Rated, and "(% of NIG)" for the 
 Distressed sub-line.
 
-When citing a bucket that carries an "(exited)" or "(new this period)" suffix in the 
-data, drop that suffix from source_field — cite the plain prefixed label. The suffix is 
-a display marker; the verifiable label is the plain name.
+**Example — CORRECT emission for a multi-figure parent sentence:**
 
-For values you compute yourself (sums, ratios, deltas not pre-computed), set source_field 
-to "calculated".
+Sentence: "The top two parents by committed exposure are Acme Corp ($562.88M, 56.3% 
+of slice) and Beta Industries ($412.30M, 41.2% of slice)."
+
+Claims:
+  { source_field: "Industry Portfolio: {{portfolio}} — Acme Corp",                              cited_value: "$562.88M" }
+  { source_field: "Industry Portfolio: {{portfolio}} — Acme Corp (% of slice commitment)",      cited_value: "56.3%" }
+  { source_field: "Industry Portfolio: {{portfolio}} — Beta Industries",                        cited_value: "$412.30M" }
+  { source_field: "Industry Portfolio: {{portfolio}} — Beta Industries (% of slice commitment)", cited_value: "41.2%" }
+
+**Example — CORRECT emission for a facility-level WAPD-driver sentence:**
+
+Sentence: "F100 Term Loan, a Delta Co facility, drives 97.66% of the slice's WAPD 
+numerator with $20.00M committed and an implied PD of 100.00%."
+
+Claims:
+  { source_field: "Industry Portfolio: {{portfolio}} — F100 Term Loan (share of slice WAPD numerator)", cited_value: "97.66%" }
+  { source_field: "Industry Portfolio: {{portfolio}} — F100 Term Loan (committed)",   cited_value: "$20.00M" }
+  { source_field: "Industry Portfolio: {{portfolio}} — F100 Term Loan (implied PD)",  cited_value: "100.00%" }
+
+**Examples — INCORRECT (do NOT do this):**
+
+  { source_field: "Industry Portfolio: {{portfolio}} — Top 5 parents by committed exposure",
+    cited_value: "$562.88M, $412.30M" }
+    # wrong: a single claim can only verify a single value against a single label
+
+  { source_field: "Industry Portfolio: {{portfolio}} — F100 Term Loan — parent Delta Co",
+    cited_value: "97.66%" }
+    # wrong: facility-level labels do not include parent name; that's display-only
+
+  { source_field: "Industry Portfolio: {{portfolio}} — Acme Corp — Committed",
+    cited_value: "$562.88M" }
+    # wrong: parent labels have no metric suffix; the bare parent name IS the committed value
+
+When citing a bucket that carries an "(exited)" or "(new this period)" suffix in the 
+data, drop that suffix from source_field — cite the plain prefixed label. The suffix 
+is a display marker; the verifiable label is the plain name.
+
+For values you compute yourself (sums, ratios, deltas not pre-computed), set 
+source_field to "calculated".

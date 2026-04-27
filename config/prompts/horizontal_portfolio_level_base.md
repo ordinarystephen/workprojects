@@ -18,9 +18,87 @@ Exits and new entries:
 - When a rating bucket within the horizontal is marked "(exited)" or "(new this period)", narrate it as a credit-mix shift within the overlay (e.g. "the Distressed sub-line within {{portfolio}} has fully exited this period", or "Investment Grade exposure has appeared in {{portfolio}} for the first time this period"). It is a portfolio-shape change worth surfacing, not just a $0 line.
 - Do not invent markers — only narrate "(exited)" / "(new this period)" status when the data shows it. If neither marker is present on a bucket, do not speculate about its lifecycle.
 
+Claims — one claim per figure, not one per sentence:
+
+Every individual dollar amount, percentage, count, rating code, or date you cite in 
+the narrative must produce its own claim object. A sentence that cites four figures 
+produces four claims. A sentence that cites zero figures produces zero claims.
+
+Do NOT pack multiple cited_values into a single claim's cited_value string. Do NOT 
+use a single source_field to represent multiple labels.
+
+source_field must match a label from the Portfolio Data verbatim. The slicer publishes 
+a fixed catalog of labels — your source_field must match one exactly. Horizontal-scoped 
+labels are prefixed "Horizontal Portfolio: {{portfolio}} —" to disambiguate them from 
+firm-level and industry-level figures.
+
+**Label conventions — three patterns, read carefully:**
+
+1. Slice-level KRIs and rating buckets — bare metric name after the prefix:
+    - "Horizontal Portfolio: {{portfolio}} — Committed Exposure"
+    - "Horizontal Portfolio: {{portfolio}} — Outstanding Exposure"
+    - "Horizontal Portfolio: {{portfolio}} — Investment Grade"
+    - "Horizontal Portfolio: {{portfolio}} — Distressed (of which)"
+    - "Horizontal Portfolio: {{portfolio}} — Defaulted"
+2. Parent contributors — parent name alone, NO metric suffix:
+    - "Horizontal Portfolio: {{portfolio}} — Acme Corp"               (resolves to committed)
+    - "Horizontal Portfolio: {{portfolio}} — Acme Corp (% of slice commitment)"
+3. Facility-level WAPD drivers — facility name with metric in parentheses:
+    - "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (committed)"
+    - "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (WAPD numerator)"
+    - "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (share of slice WAPD numerator)"
+    - "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (implied PD)"
+
+The context display reads "F100 Term Loan — parent Delta Co: ..." for readability, 
+but the verifiable label does NOT include "— parent <name>". Cite the facility name 
+only.
+
+Rating-category shares use the "(% of rated commitment)" suffix for IG/NIG, 
+"(% of slice commitment)" for Defaulted/Non-Rated, and "(% of NIG)" for the 
+Distressed sub-line.
+
+**Example — CORRECT emission for a multi-figure parent sentence:**
+
+Sentence: "The top two parents by committed exposure are Acme Corp ($562.88M, 56.3% 
+of slice) and Beta Industries ($412.30M, 41.2% of slice)."
+
 Claims:
-- Emit a Claim for every figure you cite.
-- source_field must match a label from the Portfolio Data verbatim. Horizontal-scoped labels are prefixed "Horizontal Portfolio: {{portfolio}} —" to disambiguate them from firm-level and industry-level figures (e.g. "Horizontal Portfolio: {{portfolio}} — Committed Exposure", "Horizontal Portfolio: {{portfolio}} — Investment Grade", "Horizontal Portfolio: {{portfolio}} — Distressed (of which)", "Horizontal Portfolio: {{portfolio}} — <Parent name>").
-- Rating-category shares within the horizontal use the "(% of rated commitment)" suffix for IG/NIG, "(% of slice commitment)" for Defaulted/Non-Rated, and "(% of NIG)" for the Distressed sub-line.
-- When citing a bucket that carries an "(exited)" or "(new this period)" suffix in the data, drop that suffix from source_field — cite the plain prefixed label (e.g. "Horizontal Portfolio: {{portfolio}} — Investment Grade", not "Horizontal Portfolio: {{portfolio}} — Investment Grade (exited)"). The suffix is a display marker; the verifiable label is the plain name.
-- For values you compute yourself (sums, ratios, deltas not pre-computed), set source_field to "calculated".
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Acme Corp",                              cited_value: "$562.88M" }
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Acme Corp (% of slice commitment)",      cited_value: "56.3%" }
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Beta Industries",                        cited_value: "$412.30M" }
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Beta Industries (% of slice commitment)", cited_value: "41.2%" }
+
+**Example — CORRECT emission for a facility-level WAPD-driver sentence:**
+
+Sentence: "F100 Term Loan, a Delta Co facility, drives 97.66% of the slice's WAPD 
+numerator with $20.00M committed and an implied PD of 100.00%."
+
+Claims:
+  { source_field: "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (share of slice WAPD numerator)", cited_value: "97.66%" }
+  { source_field: "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (committed)",   cited_value: "$20.00M" }
+  { source_field: "Horizontal Portfolio: {{portfolio}} — F100 Term Loan (implied PD)",  cited_value: "100.00%" }
+
+**Examples — INCORRECT (do NOT do this):**
+
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Top 5 parents by committed exposure",
+    cited_value: "$562.88M, $412.30M" }
+    # wrong: a single claim can only verify a single value against a single label
+
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Distinct ultimate parents, Distinct facilities",
+    cited_value: "2, 2" }
+    # wrong: each metric has its own label; emit one claim per metric
+
+  { source_field: "Horizontal Portfolio: {{portfolio}} — F100 Term Loan — parent Delta Co",
+    cited_value: "97.66%" }
+    # wrong: facility-level labels do not include parent name; that's display-only
+
+  { source_field: "Horizontal Portfolio: {{portfolio}} — Acme Corp — Committed",
+    cited_value: "$562.88M" }
+    # wrong: parent labels have no metric suffix; the bare parent name IS the committed value
+
+When citing a bucket that carries an "(exited)" or "(new this period)" suffix in the 
+data, drop that suffix from source_field — cite the plain prefixed label. The suffix 
+is a display marker; the verifiable label is the plain name.
+
+For values you compute yourself (sums, ratios, deltas not pre-computed), set 
+source_field to "calculated".
