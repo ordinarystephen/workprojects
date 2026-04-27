@@ -609,3 +609,46 @@ The `{{portfolio}}` placeholder reaching the user-facing textarea at all is brok
 
 - Replace `static/main.js`.
 - Restart `server.py` so the cached static file is served fresh (Flask serves `static/` from disk on each request, but if you're running behind a proxy that caches static assets, force a refresh).
+
+---
+
+## Round 23 — Stopgap parameter extraction from edited prompt text
+
+Commit: _see `git log` on branch `kronos`_
+
+Round 22 fixed mode preservation through textarea edits, but parameterized canned modes still went out with `parameters: {}` because the user replaces `{{portfolio}}` in the textarea with an industry name and there's currently no UI affordance writing that value back to `activeParameters`. The slicer's cube-aware validator returns 400 on missing required param. This round adds a submit-time recovery: diff the user's textarea against the canned-button template, extract the substituted value, and write it back to `activeParameters` before the request body is built. Stopgap until the parameter-picker dropdown lands.
+
+- [ ] `static/main.js` — added `extractParametersFromPromptText(modeSlug, currentText)` helper just below `attachCannedHandler`. Looks up the canned button by `[data-mode="${modeSlug}"]` (always present in the DOM regardless of selection state thanks to Round 22), reads `btn.dataset.prompt` (the original template populated at /modes fetch time), regex-finds `{{name}}` placeholders, strict prefix/suffix splits to recover the substituted value. Single-placeholder only; multi-placeholder templates (e.g. `portfolio-comparison`'s `{{portfolio_a}}` + `{{portfolio_b}}`) log a warning and skip — those are status=placeholder modes today and 501 anyway. Edited surrounding text → prefix/suffix mismatch → returns `{}` and lets the server's existing 400 surface a clear error. Glue at the top of `runAnalysis()` runs the helper only when `activeMode` is set AND `activeParameters` is empty (so a future dropdown picker writing to `activeParameters` takes precedence). Writes back to module-level `activeParameters` so follow-up turns inherit the same values via `inheritedParameters` in `showResults()`.
+
+### Behaviour change
+
+- Parameterized canned modes (`industry-portfolio-level`, `horizontal-portfolio-level`) now work end-to-end through the textarea-edit pattern. Click *Industry Portfolio Analysis* → textarea shows `Provide a detailed analysis of the {{portfolio}} industry portfolio.` → user replaces `{{portfolio}}` with `Information Technology` → click Run → request body now contains `parameters: {portfolio: "Information Technology"}` → slicer routes correctly → verification rate jumps from "missing parameter / 0% (placeholder fallback)" to a healthy number (high-teens to low-twenties verified per Round 20/21 diagnostic).
+- Non-parameterized modes (`firm-level`) and unmodified canned prompts (user clicks *Firm-Level View* and submits without editing) are unaffected — extraction returns `{}` cleanly.
+- A user who heavily edits the canned prompt (changes the surrounding sentence structure) gets a 400 from the server with the missing-parameter message, same as today. Extraction is conservative: it doesn't guess.
+
+### What's NOT changed
+
+- `attachCannedHandler` — untouched. Round 22's `activeMode` preservation fix stays as-is.
+- The textarea input handler — untouched.
+- The follow-up flow — untouched. `showResults()` still snapshots `activeParameters` into `inheritedParameters`; the only change is that snapshot will now contain the extracted value instead of being empty.
+- The button DOM (`btn.dataset.prompt`, `btn.dataset.parameters`) — read-only consumer of values already set on /modes fetch.
+
+### TODO before the dropdown UI lands
+
+The success-path `console.log('[KRONOS] Extracted parameters from prompt text', ...)` in `runAnalysis` is fine for diagnosing this initial rollout but should be removed (or downgraded to a debug-level helper that respects a flag) once the parameter-picker dropdown takes over and extraction becomes a rare backstop rather than the primary path. Marked with an inline `// TODO:` comment.
+
+### Verification protocol
+
+After the pull and a server restart:
+
+1. Upload `test.xlsx`.
+2. Click *Industry Portfolio Analysis* — textarea pre-fills with `Provide a detailed analysis of the {{portfolio}} industry portfolio.`
+3. Replace `{{portfolio}}` with `Information Technology`.
+4. Click Run.
+5. DevTools console: expect `[KRONOS] Extracted parameters from prompt text {portfolio: "Information Technology"}` followed by the existing `[KRONOS] Submitting upload` log line.
+6. Verification badge / panel should show a healthy verified count instead of the missing-parameter error.
+
+### Files for the Domino sync
+
+- Replace `static/main.js`. (Same file as Round 22, additive change.)
+- No server restart strictly required since Flask serves `static/` from disk per request — but a hard browser refresh (Cmd-Shift-R) is needed if your browser cached `main.js` from before the pull.

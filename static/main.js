@@ -307,6 +307,63 @@ function attachCannedHandler(btn) {
   });
 }
 
+// ── Stopgap parameter extraction from edited prompt text ──────
+// The current parameterized-mode UX has the user manually replace
+// {{portfolio}} in the textarea with an industry / horizontal name.
+// Without server-side extraction the request goes out with parameters: {}
+// and the slicer 400s on the missing required param. This function diffs
+// the user's text against the canned-button template (stored on
+// btn.dataset.prompt at /modes fetch time) and recovers the substituted
+// value via a strict prefix/suffix split.
+//
+// Intentionally fallback-only: if activeParameters is already populated
+// (a future dropdown picker writes there), this never runs. If the user
+// edited the static surrounding text the prefix/suffix match fails and
+// we let the server return its 400 with a clear message rather than
+// guessing.
+//
+// TODO: remove the success-path console.log (or downgrade it to a
+// debug-level helper) once the parameter-picker dropdown lands and this
+// extraction path becomes a backstop rather than the primary path.
+function extractParametersFromPromptText(modeSlug, currentText) {
+  const btn = cannedGrid?.querySelector(`[data-mode="${modeSlug}"]`);
+  if (!btn) return {};
+  const template = btn.dataset.prompt || '';
+  if (!template || !currentText) return {};
+
+  const placeholders = [...template.matchAll(/\{\{(\w+)\}\}/g)];
+  if (placeholders.length === 0) return {};
+  if (placeholders.length > 1) {
+    // Multi-placeholder templates (e.g. portfolio-comparison's
+    // {{portfolio_a}} + {{portfolio_b}}) need a careful diff to avoid
+    // ambiguity. Today those are placeholder modes that 501 anyway;
+    // when one goes active, replace this branch with a real diff or
+    // require the dropdown picker.
+    console.warn(
+      '[KRONOS] mode %s has %d placeholders; extraction skipped',
+      modeSlug, placeholders.length
+    );
+    return {};
+  }
+
+  const [, name] = placeholders[0];
+  const token = `{{${name}}}`;
+  const idx = template.indexOf(token);
+  const prefix = template.slice(0, idx);
+  const suffix = template.slice(idx + token.length);
+
+  // Trim before comparing so YAML folded-scalar quirks and stray
+  // textarea whitespace don't break the match.
+  const cur = currentText.trim();
+  const pre = prefix.trim();
+  const suf = suffix.trim();
+
+  if (!cur.startsWith(pre) || !cur.endsWith(suf)) return {};
+  const value = cur.slice(pre.length, cur.length - suf.length).trim();
+  if (!value || value === token) return {};
+  return { [name]: value };
+}
+
 // Fetch /modes and build the button grid on page load
 fetch(new URL('modes', document.baseURI).href, {
   headers: { [KRONOS_SESSION_HEADER]: getSessionId() },
@@ -494,6 +551,21 @@ async function runAnalysis() {
   // Transport: JSON body with base64-encoded file. We previously sent
   // multipart/form-data, but the Domino workspace proxy silently drops
   // multipart POSTs. Plain application/json passes through.
+  // Stopgap parameter extraction — see extractParametersFromPromptText.
+  // Recovers parameters from the textarea text the user edited (e.g.
+  // {{portfolio}} → "Information Technology") so parameterized canned
+  // modes route to the correct slicer instead of 400-ing on missing
+  // required params. Fallback-only: skipped if activeParameters is
+  // already populated by a future dropdown picker.
+  if (activeMode && Object.keys(activeParameters || {}).length === 0) {
+    const recovered = extractParametersFromPromptText(activeMode, customPrompt.value);
+    if (Object.keys(recovered).length) {
+      activeParameters = recovered;
+      // TODO: drop or debug-level once the dropdown picker lands.
+      console.log('[KRONOS] Extracted parameters from prompt text', activeParameters);
+    }
+  }
+
   const uploadUrl = new URL('upload', document.baseURI).href;
   console.log('[KRONOS] Submitting upload', {
     resolvedUrl: uploadUrl,
