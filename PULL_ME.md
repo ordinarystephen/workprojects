@@ -487,3 +487,38 @@ Phase 3 of five. Threads the request-level `length` field through the full reque
 ### Phase 4 follows
 
 UI length toggle (`Full Report` / `Executive Summary` / `Snapshot`) above mode-selection; default `Full Report`; follow-ups read live `activeLength`. The backend is now ready — Phase 4 only touches `static/main.js`, `static/index.html`, `static/styles.css`.
+
+---
+
+## Round 20 — Per-slice verification-variability diagnostic script
+
+Commit: _see `git log` on branch `kronos`_
+
+Diagnostic-only round. Adds a single stdlib-only Python script that captures everything needed to confirm or refute the H3 + H5 hypothesis (recent prompt rewrite + loose claim contract) for the variable verification rates seen on `industry-portfolio-level`. No code or config changes — pure investigation tooling. Run on Domino, paste output back for Phase C analysis.
+
+- [ ] `scripts/diag_perslice.py` — **NEW.** Stdlib-only (urllib + json + base64). Three consecutive `industry-portfolio-level` × Information-Technology × `length=full` runs against the running server, plus one `horizontal-portfolio-level` run for shared-layer isolation. For each run captures: timings, context_sent + narrative sha256[:12], full claims array, full `verification.claim_results` (status, reason, expected). Cross-run comparison hashes context_sent and narrative; diffs source_field sets to surface labels cited in only some runs. Failure-pattern classifier bins every non-verified claim into 11 named patterns (the H3 smoking gun is `spurious_committed_suffix`). Imports the slicer in-process (`pipeline.cube.lending.compute_lending_cube` + the registered slicer) to dump the canonical `verifiable_values` catalog the LLM should have cited from. Auto-picks the alphabetical-first industry and horizontal from `POST /cube/parameter-options`. Defaults to `pipeline/tests/fixtures/smoke_lending.xlsx`; override via `KRONOS_FIXTURE` env var.
+
+### How to run on Domino
+
+1. Make sure `server.py` is running (port 5000).
+2. From repo root:
+   ```bash
+   python3 scripts/diag_perslice.py > diag_perslice.out 2>&1
+   ```
+   Optional: `KRONOS_URL=http://...` / `KRONOS_FIXTURE=/path/to/your.xlsx`.
+3. Paste `diag_perslice.out` back.
+
+### Exit codes
+
+- 0 — success (all six steps ran; non-200 LLM responses are surfaced inline, not exit-coded).
+- 2 — fixture missing or `/cube/parameter-options` unreachable / non-200.
+- 3 — no industry options resolved from the fixture.
+- 4 — in-process industry slicer dump raised (registry / classifier / cube failure).
+
+### Behaviour change
+
+- None. Script reads but does not modify anything. Running it three times in a row makes three `/upload` requests + their LLM calls.
+
+### Cleanup
+
+- Delete `scripts/diag_perslice.py` once the investigation lands a fix and the script is no longer useful, OR keep it as a generic per-slice variability probe (small, self-contained, no server dependency beyond the existing endpoints).
