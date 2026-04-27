@@ -343,14 +343,19 @@ fetch(new URL('modes', document.baseURI).href, {
     console.warn('[KRONOS] /modes fetch failed; canned grid empty', err);
   });
 
-// If the user starts typing, deselect any active canned button.
-// Their custom text takes over and activeMode is cleared (no specific script).
+// If the user starts editing the prompt, visually deselect the active
+// canned button so the UI signals "this prompt has been edited" — but
+// preserve activeMode and activeParameters so the correct slicer still
+// runs at submit time. Without this, a user who picks Industry
+// Portfolio Analysis and tweaks the prompt would route to
+// placeholder_processor (mode=""), producing 0 verifiable_values and
+// 0% verification rate. To truly clear the mode, the user can click
+// the canned button again (the attachCannedHandler toggle path) or
+// hit "New Analysis".
 customPrompt.addEventListener('input', () => {
   if (activeCannedBtn) {
     activeCannedBtn.classList.remove('active');
     activeCannedBtn = null;
-    activeMode = null; // custom question has no associated pipeline script
-    activeParameters = {};
     promptHint.textContent = '';
   }
   // Auto-grow textarea height with content

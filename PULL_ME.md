@@ -574,3 +574,38 @@ Horizontal × 1 run: 6 claims, 4 verified, 2 failed — both failures were multi
 - Replace `config/prompts/industry_portfolio_level_base.md`.
 - Replace `config/prompts/horizontal_portfolio_level_base.md`.
 - (Optional) leave `scripts/diag_perslice.py` in place to re-run for confirmation; can delete after verification.
+
+---
+
+## Round 22 — Preserve activeMode/activeParameters on textarea input
+
+Commit: _see `git log` on branch `kronos`_
+
+Codex-diagnosed bug. The `customPrompt` input event handler in [`static/main.js`](static/main.js) was clearing `activeMode` and `activeParameters` on every keystroke, so any user who picked a canned mode (e.g. *Industry Portfolio Analysis*) and then edited the prompt — for example to replace the literal `{{portfolio}}` placeholder with an actual industry name — was silently routed to `placeholder_processor` because the request went out with `mode: ""`. The slicer never ran, no `verifiable_values` were published, and verification rate was 0%. Round 21's prompt-label fix had no chance of helping because the slicer wasn't being called at all.
+
+- [ ] `static/main.js` — input event handler at the canned-button area. Removed two lines that cleared `activeMode = null` and `activeParameters = {}`. Kept the visual deselect (`classList.remove('active')`, `activeCannedBtn = null`, `promptHint.textContent = ''`) so the UI still signals "this prompt has been edited." Updated the inline comment to document the rationale and the three legitimate paths for clearing mode state (toggle-off via clicking the same canned button, switching canned buttons, "New Analysis"). Three-line code change; ten-line comment expansion.
+
+### Behaviour change
+
+- Picking a canned mode and editing the prompt now produces the canned mode's narrative shape (correct slicer, full `verifiable_values` catalog) rather than the placeholder summary. Verification rates on edited canned prompts should jump from 0% to the same range as un-edited canned prompts (50–100% depending on which figures the LLM cites and the prompt-label discipline added in Round 21).
+- The visual signal "you've edited the prompt" still fires (button visually deselects, hint clears) — only the underlying mode association is preserved.
+- The three legitimate state-clear paths are unchanged: clicking the same canned button still toggles off (clearing `activeMode` + `activeParameters` explicitly), switching canned buttons still overwrites them, "New Analysis" still resets the inherited snapshot.
+
+### Verification protocol
+
+After the pull and a server restart, repeat the UI flow that was producing 0/N verification:
+
+1. Upload the workbook.
+2. Click *Industry Portfolio Analysis* (or *Horizontal Portfolio Analysis*).
+3. Edit the prompt — replace `{{portfolio}}` with a real industry name (e.g. `Information Technology`).
+4. Run.
+5. Expect: verification rate matches what `scripts/diag_perslice.py` reported on Round 20/21 (high-teens to low-twenties verified out of low-twenties total claims, depending on jitter).
+
+### Stopgap, not the final UX
+
+The `{{portfolio}}` placeholder reaching the user-facing textarea at all is broken UX — placeholders belong server-side. Codex flagged a follow-up "missing parameter picker" issue: the parameterized canned modes should surface a dropdown (populated from `POST /cube/parameter-options`) instead of asking the user to manually type an industry name into the prompt. That work is planned for the next session and is out of scope here.
+
+### Files for the Domino sync
+
+- Replace `static/main.js`.
+- Restart `server.py` so the cached static file is served fresh (Flask serves `static/` from disk on each request, but if you're running behind a proxy that caches static assets, force a refresh).
