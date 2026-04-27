@@ -325,3 +325,5 @@ Path 2 (codify the current divergence as intentional) is what exists now — doc
 **Triggered by:** Smoke tests existing + either a concrete pain point from prompt authors (this slicer's labels are inconsistent) or a broader doc/prompt refactor where label work is already touching these files.
 
 
+**Comprehensive / multi-scope synthesis mode.**
+ A mode that produces one document covering firm-level + all active industries + all active horizontals. Addresses the "I need a full bank report without clicking through every scope" use case. Three implementation paths: (1) concatenation of existing scope outputs with mechanical stitching, (2) concatenation plus a synthesis LLM pass that weaves cross-scope narrative, (3) planner-driven composition where the LLM decides foregrounding based on materiality. Token and quality-drift concerns mean Path 1 is the safest starting point; Path 2 if Path 1 feels insufficient after real usage; Path 3 only if there's clear demand. Triggered by: user requests for "give me the full picture in one output." Should be built after MVP launches and real usage reveals whether the need is real.

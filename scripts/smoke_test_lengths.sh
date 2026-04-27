@@ -80,15 +80,16 @@ PYEOF
   fi
 
   if [[ "$STATUS" == "200" ]]; then
-    NARRATIVE=$(echo "$BODY_OUT" | python3 -c "
-import json, sys
+    NARRATIVE=$(BODY_OUT="$BODY_OUT" python3 <<'PYEOF'
+import json, os, sys
 try:
-    data = json.load(sys.stdin)
-    print(data.get('narrative', ''))
+    data = json.loads(os.environ["BODY_OUT"])
+    print(data.get("narrative", ""))
 except Exception as e:
-    print(f'JSON parse error: {e}', file=sys.stderr)
+    print(f"JSON parse error: {e}", file=sys.stderr)
     sys.exit(1)
-")
+PYEOF
+)
     CHAR_COUNT=${#NARRATIVE}
     SENTENCE_COUNT=$(echo "$NARRATIVE" | grep -oE '[.!?]+' | wc -l | tr -d ' ')
 
